@@ -32,8 +32,7 @@ test: $(BUILD_DIR)/test_pe
 check: all test
 
 sanitize:
-	$(MAKE) clean
-	$(MAKE) check CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer" LDFLAGS="-fsanitize=address,undefined"
+	$(MAKE) check BUILD_DIR="$(BUILD_DIR)/sanitize" CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer" LDFLAGS="-fsanitize=address,undefined"
 
 sanitize-no-leaks:
 	$(MAKE) sanitize ASAN_OPTIONS=detect_leaks=0
