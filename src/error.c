@@ -24,10 +24,13 @@ const char *sl_status_string(sl_status status) {
         return "invalid PE image";
     case SL_ERROR_RVA_NOT_MAPPED:
         return "RVA is not backed by file data";
+    case SL_ERROR_RELOCATION_REQUIRED:
+        return "image cannot be loaded away from its preferred base";
+    case SL_ERROR_UNSUPPORTED_RELOCATION:
+        return "unsupported PE base relocation";
     case SL_ERROR_NOT_IMPLEMENTED:
         return "not implemented yet";
     default:
         return "unknown error";
     }
 }
-

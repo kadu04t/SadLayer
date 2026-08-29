@@ -34,6 +34,17 @@ static void put_u64(uint8_t *data, size_t offset, uint64_t value) {
     put_u32(data, offset + 4U, (uint32_t)(value >> 32U));
 }
 
+static uint32_t get_u32(const uint8_t *data, size_t offset) {
+    return (uint32_t)data[offset] | ((uint32_t)data[offset + 1U] << 8U) |
+           ((uint32_t)data[offset + 2U] << 16U) |
+           ((uint32_t)data[offset + 3U] << 24U);
+}
+
+static uint64_t get_u64(const uint8_t *data, size_t offset) {
+    return (uint64_t)get_u32(data, offset) |
+           ((uint64_t)get_u32(data, offset + 4U) << 32U);
+}
+
 static void make_pe64_fixture(uint8_t data[FIXTURE_SIZE]) {
     const size_t pe = 0x80U;
     const size_t coff = pe + 4U;
@@ -60,6 +71,8 @@ static void make_pe64_fixture(uint8_t data[FIXTURE_SIZE]) {
     put_u32(data, optional + 108U, 16U);
     put_u32(data, optional + 112U + 8U, 0x1020U);
     put_u32(data, optional + 112U + 12U, 40U);
+    put_u32(data, optional + 112U + 40U, 0x10d0U);
+    put_u32(data, optional + 112U + 44U, 12U);
 
     memcpy(data + section, ".rdata", 6U);
     put_u32(data, section + 8U, 0x200U);
@@ -77,6 +90,11 @@ static void make_pe64_fixture(uint8_t data[FIXTURE_SIZE]) {
     put_u64(data, 0x2a0U, 0U);
     put_u16(data, 0x2b0U, 7U);
     memcpy(data + 0x2b2U, "ExitProcess", 12U);
+    put_u64(data, 0x210U, UINT64_C(0x140001234));
+    put_u32(data, 0x2d0U, 0x1000U);
+    put_u32(data, 0x2d4U, 12U);
+    put_u16(data, 0x2d8U, 0xa010U);
+    put_u16(data, 0x2daU, 0U);
     data[0x200U] = 0xabu;
 }
 
@@ -106,6 +124,8 @@ static void make_pe32_fixture(uint8_t data[FIXTURE_SIZE]) {
     put_u32(data, optional + 92U, 16U);
     put_u32(data, optional + 96U + 8U, 0x1020U);
     put_u32(data, optional + 96U + 12U, 40U);
+    put_u32(data, optional + 96U + 40U, 0x10d0U);
+    put_u32(data, optional + 96U + 44U, 12U);
 
     memcpy(data + section, ".text", 5U);
     put_u32(data, section + 8U, 0x100U);
@@ -123,6 +143,11 @@ static void make_pe32_fixture(uint8_t data[FIXTURE_SIZE]) {
     put_u32(data, 0x298U, 0U);
     put_u16(data, 0x2b0U, 7U);
     memcpy(data + 0x2b2U, "ExitProcess", 12U);
+    put_u32(data, 0x210U, 0x00401234U);
+    put_u32(data, 0x2d0U, 0x1000U);
+    put_u32(data, 0x2d4U, 12U);
+    put_u16(data, 0x2d8U, 0x3010U);
+    put_u16(data, 0x2daU, 0U);
 }
 
 static bool test_parse_pe64(void) {
@@ -256,6 +281,65 @@ static bool test_import_symbol_enumeration(void) {
     return true;
 }
 
+static bool test_base_relocations(void) {
+    uint8_t fixture[FIXTURE_SIZE];
+    sl_pe_image image;
+    sl_mapped_image mapped = {0};
+
+    make_pe64_fixture(fixture);
+    CHECK(sl_pe_parse((sl_byte_view){fixture, sizeof(fixture)}, &image) ==
+          SL_OK);
+    CHECK(sl_loader_map_image(&image, &mapped) == SL_OK);
+    CHECK(mapped.load_base == UINT64_C(0x140000000));
+    CHECK(sl_loader_apply_relocations(&image, &mapped,
+                                      UINT64_C(0x150000000)) == SL_OK);
+    CHECK(mapped.load_base == UINT64_C(0x150000000));
+    CHECK(get_u64(mapped.bytes, 0x1010U) == UINT64_C(0x150001234));
+    sl_loader_unmap_image(&mapped);
+
+    make_pe32_fixture(fixture);
+    CHECK(sl_pe_parse((sl_byte_view){fixture, sizeof(fixture)}, &image) ==
+          SL_OK);
+    CHECK(sl_loader_map_image(&image, &mapped) == SL_OK);
+    CHECK(sl_loader_apply_relocations(&image, &mapped,
+                                      UINT64_C(0x00500000)) == SL_OK);
+    CHECK(mapped.load_base == UINT64_C(0x00500000));
+    CHECK(get_u32(mapped.bytes, 0x1010U) == 0x00501234U);
+    sl_loader_unmap_image(&mapped);
+    return true;
+}
+
+static bool test_relocation_failures_are_atomic(void) {
+    uint8_t fixture[FIXTURE_SIZE];
+    sl_pe_image image;
+    sl_mapped_image mapped = {0};
+    make_pe64_fixture(fixture);
+    CHECK(sl_pe_parse((sl_byte_view){fixture, sizeof(fixture)}, &image) ==
+          SL_OK);
+    CHECK(sl_loader_map_image(&image, &mapped) == SL_OK);
+    mapped.bytes[0x10d8U] = 0x10U;
+    mapped.bytes[0x10d9U] = 0x50U;
+    uint64_t original = get_u64(mapped.bytes, 0x1010U);
+    CHECK(sl_loader_apply_relocations(&image, &mapped,
+                                      UINT64_C(0x150000000)) ==
+          SL_ERROR_UNSUPPORTED_RELOCATION);
+    CHECK(mapped.load_base == mapped.preferred_base);
+    CHECK(get_u64(mapped.bytes, 0x1010U) == original);
+    sl_loader_unmap_image(&mapped);
+
+    make_pe64_fixture(fixture);
+    CHECK(sl_pe_parse((sl_byte_view){fixture, sizeof(fixture)}, &image) ==
+          SL_OK);
+    image.directories[SL_PE_DIRECTORY_BASERELOC] =
+        (sl_pe_data_directory){0U, 0U};
+    CHECK(sl_loader_map_image(&image, &mapped) == SL_OK);
+    CHECK(sl_loader_apply_relocations(&image, &mapped,
+                                      UINT64_C(0x150000000)) ==
+          SL_ERROR_RELOCATION_REQUIRED);
+    sl_loader_unmap_image(&mapped);
+    return true;
+}
+
 static bool test_rejects_malformed_files(void) {
     uint8_t fixture[FIXTURE_SIZE];
     sl_pe_image image;
@@ -285,6 +369,9 @@ int main(void) {
         {"translate RVA and map image", test_rva_translation_and_mapping},
         {"enumerate imports", test_import_enumeration},
         {"enumerate import symbols", test_import_symbol_enumeration},
+        {"apply base relocations", test_base_relocations},
+        {"reject invalid relocations atomically",
+         test_relocation_failures_are_atomic},
         {"reject malformed files", test_rejects_malformed_files},
     };
     size_t passed = 0U;

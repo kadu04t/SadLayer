@@ -13,10 +13,11 @@ typedef enum {
     SL_ERROR_UNSUPPORTED_OPTIONAL_HEADER,
     SL_ERROR_INVALID_IMAGE,
     SL_ERROR_RVA_NOT_MAPPED,
+    SL_ERROR_RELOCATION_REQUIRED,
+    SL_ERROR_UNSUPPORTED_RELOCATION,
     SL_ERROR_NOT_IMPLEMENTED
 } sl_status;
 
 const char *sl_status_string(sl_status status);
 
 #endif
-
