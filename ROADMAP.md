@@ -8,7 +8,7 @@ failure identifies the next subsystem instead of hiding behind one binary goal.
 Dates are intentionally omitted. Completion is based on exit criteria and test
 artifacts, not estimates made before the target binary has been profiled.
 
-## Stage 0 — Bootstrap and target inventory (current)
+## Stage 0 — Bootstrap and target inventory (complete for profiled build)
 
 Deliverables:
 
@@ -20,21 +20,26 @@ Deliverables:
   imports, PE features, and runtime logs.
 
 Exit gate: `sadlayer inspect` and `sadlayer map` succeed on the target executable
-without sanitizer findings. The inventory is recorded in an issue without
+without sanitizer findings. The inventory is recorded as metadata without
 shipping proprietary files.
+
+This gate is satisfied for the hashes recorded in
+`docs/HOLLOW_KNIGHT_TARGET.md`.
 
 ## Stage 1 — Correct PE loader and process bootstrap
 
 Implement, in order:
 
-1. Base relocations and deterministic image address selection.
-2. Import tables by name and ordinal, delay imports, forwarded exports, and a
-   module registry.
-3. Export parsing for built-in SadLayer DLL modules.
-4. TLS directory, callbacks, thread-local storage, and PE section protections.
-5. x86-64 Windows ABI thunks (`ms_abi`) and a guarded jump to the guest entry
-   point. Keep x86 parsing, but defer 32-bit execution to a separate process.
-6. Structured tracing for module load, symbol resolution, calls, and last error.
+- [x] Base relocations for PE32/PE32+ images.
+- [x] Import enumeration by name and ordinal.
+- [x] Export lookup by name and ordinal, including forwarded exports.
+- [ ] Deterministic guest address selection and executable memory mapping.
+- [ ] IAT binding, delay imports, forwarder traversal, and a module registry.
+- [ ] TLS directory, callbacks, thread-local storage, and PE section protections.
+- [ ] x86-64 Windows ABI thunks (`ms_abi`) and a guarded jump to the guest entry
+  point. Keep x86 parsing, but defer 32-bit execution to a separate process.
+- [ ] Structured tracing for module load, symbol resolution, calls, and last
+  error.
 
 Exit gate: a synthetic Windows fixture calls a built-in `kernel32` function from
 its real entry point and exits with the expected code.
@@ -127,4 +132,3 @@ restart, and load it with stable rendering, sound, and input.
 - Bit-for-bit Windows behavior where Unity/Hollow Knight does not observe it.
 - Pretending a stub is implemented: compatibility shims must return documented
   failures and emit a trace until their behavior is real.
-

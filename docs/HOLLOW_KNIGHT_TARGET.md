@@ -18,6 +18,8 @@ Both are PE32+ x86-64 images. The executable imports only `UnityPlayer.dll` and
 `UnityPlayer.dll` has preferred base `0x180000000`, entry RVA `0x199d5ec`, image
 size `0x211e000`, eight sections, and both `.pdata` and `.reloc` data. SadLayer's
 import inventory currently finds 522 symbols: 484 by name and 38 by ordinal.
+The launcher imports `UnityMain2`; SadLayer resolves it to export ordinal 2 at
+RVA `0x7da7a0` in this `UnityPlayer.dll`.
 
 ## Direct UnityPlayer modules
 

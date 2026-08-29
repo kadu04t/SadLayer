@@ -16,12 +16,14 @@ The bootstrap can already:
 - validate PE32 and PE32+ headers with bounds checks;
 - describe architecture, subsystem, entry point, sections, and imported DLLs;
 - enumerate imported symbols by name or ordinal and report their IAT RVAs;
+- resolve DLL exports by name or ordinal, including forwarded exports;
 - translate RVAs to file offsets;
 - map headers and sections into an in-memory image;
+- apply PE32 `HIGHLOW` and PE32+ `DIR64` base relocations atomically;
 - classify the first Win32 DLL targets needed by the runtime;
 - reject malformed and unsupported images with explicit errors.
 
-Import symbol binding, relocations, TLS, Win32 calls, and guest execution are the
+Import binding, module loading, TLS, Win32 calls, and guest execution are the
 next stages. See [ROADMAP.md](ROADMAP.md) for the ordered compatibility plan and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries.
 
@@ -39,6 +41,7 @@ Useful commands:
 ```sh
 ./build/sadlayer inspect /path/to/game.exe
 ./build/sadlayer imports /path/to/UnityPlayer.dll
+./build/sadlayer resolve-export /path/to/UnityPlayer.dll UnityMain2
 ./build/sadlayer map /path/to/game.exe
 ./build/sadlayer run /path/to/game.exe
 make sanitize
