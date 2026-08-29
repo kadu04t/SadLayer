@@ -18,14 +18,21 @@ typedef struct {
     size_t bootstrap_count;
 } import_summary;
 
+typedef struct {
+    size_t count;
+    size_t named_count;
+    size_t ordinal_count;
+} symbol_summary;
+
 static void print_usage(FILE *stream, const char *program) {
     fprintf(stream,
             "SadLayer - experimental Windows compatibility layer\n\n"
             "Usage:\n"
             "  %s inspect <program.exe>\n"
+            "  %s imports <program.exe>\n"
             "  %s map <program.exe>\n"
             "  %s run <program.exe>\n",
-            program, program, program);
+            program, program, program, program);
 }
 
 static sl_status read_entire_file(const char *path, owned_file *file) {
@@ -108,6 +115,35 @@ static sl_status inspect_image(const sl_pe_image *image) {
     return SL_OK;
 }
 
+static bool print_import_symbol(const sl_pe_import_symbol *symbol,
+                                void *context) {
+    symbol_summary *summary = context;
+    printf("  %s!", symbol->module_name);
+    if (symbol->by_ordinal) {
+        printf("#%u", symbol->ordinal);
+        ++summary->ordinal_count;
+    } else {
+        printf("%s (hint %u)", symbol->symbol_name, symbol->hint);
+        ++summary->named_count;
+    }
+    printf(" -> IAT RVA 0x%08" PRIx32 "\n", symbol->iat_rva);
+    ++summary->count;
+    return true;
+}
+
+static sl_status inspect_import_symbols(const sl_pe_image *image) {
+    symbol_summary summary = {0U, 0U, 0U};
+    puts("Imported symbols:");
+    sl_status status =
+        sl_pe_for_each_import_symbol(image, print_import_symbol, &summary);
+    if (status != SL_OK) {
+        return status;
+    }
+    printf("Total: %zu symbols (%zu by name, %zu by ordinal)\n", summary.count,
+           summary.named_count, summary.ordinal_count);
+    return SL_OK;
+}
+
 static sl_status map_image(const sl_pe_image *image) {
     sl_mapped_image mapped = {0};
     sl_status status = sl_loader_map_image(image, &mapped);
@@ -126,9 +162,10 @@ int main(int argc, char **argv) {
         return 2;
     }
     bool inspect = strcmp(argv[1], "inspect") == 0;
+    bool list_imports = strcmp(argv[1], "imports") == 0;
     bool map = strcmp(argv[1], "map") == 0;
     bool run = strcmp(argv[1], "run") == 0;
-    if (!inspect && !map && !run) {
+    if (!inspect && !list_imports && !map && !run) {
         print_usage(stderr, argv[0]);
         return 2;
     }
@@ -144,6 +181,8 @@ int main(int argc, char **argv) {
     status = sl_pe_parse((sl_byte_view){file.data, file.size}, &image);
     if (status == SL_OK && inspect) {
         status = inspect_image(&image);
+    } else if (status == SL_OK && list_imports) {
+        status = inspect_import_symbols(&image);
     } else if (status == SL_OK) {
         status = map_image(&image);
         if (status == SL_OK && run) {
