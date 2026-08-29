@@ -158,3 +158,17 @@ sl_status sl_module_registry_resolve(const sl_module_registry *registry,
     return resolve_symbol(registry, import->module_name, import->symbol_name,
                           import->ordinal, import->by_ordinal, 0U, result);
 }
+
+sl_status sl_module_registry_import_resolver(
+    const sl_pe_import_symbol *import, uint64_t *guest_address, void *context) {
+    if (guest_address == NULL || context == NULL) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    sl_resolved_symbol resolved;
+    sl_status status = sl_module_registry_resolve(
+        (const sl_module_registry *)context, import, &resolved);
+    if (status == SL_OK) {
+        *guest_address = resolved.guest_address;
+    }
+    return status;
+}

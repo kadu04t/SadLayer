@@ -36,6 +36,8 @@ const char *sl_status_string(sl_status status) {
         return "invalid PE export forwarder";
     case SL_ERROR_FORWARDER_LIMIT:
         return "PE export forwarder limit reached";
+    case SL_ERROR_ADDRESS_OUT_OF_RANGE:
+        return "resolved guest address does not fit the image architecture";
     case SL_ERROR_RELOCATION_REQUIRED:
         return "image cannot be loaded away from its preferred base";
     case SL_ERROR_UNSUPPORTED_RELOCATION:

@@ -441,6 +441,72 @@ static bool test_module_registry_resolution(void) {
     return true;
 }
 
+typedef struct {
+    bool fail_on_ordinal;
+    uint64_t named_address;
+    uint64_t ordinal_address;
+} mock_resolver_context;
+
+static sl_status mock_import_resolver(const sl_pe_import_symbol *import,
+                                      uint64_t *guest_address, void *context) {
+    const mock_resolver_context *mock = context;
+    if (import->by_ordinal) {
+        if (mock->fail_on_ordinal) {
+            return SL_ERROR_EXPORT_NOT_FOUND;
+        }
+        *guest_address = mock->ordinal_address;
+    } else {
+        *guest_address = mock->named_address;
+    }
+    return SL_OK;
+}
+
+static bool test_atomic_iat_binding(void) {
+    uint8_t fixture[FIXTURE_SIZE];
+    sl_pe_image image;
+    sl_mapped_image mapped = {0};
+    mock_resolver_context resolver = {
+        false, UINT64_C(0x180001000), UINT64_C(0x180002000)};
+    size_t bound_count = 0U;
+
+    make_pe64_fixture(fixture);
+    CHECK(sl_pe_parse((sl_byte_view){fixture, sizeof(fixture)}, &image) ==
+          SL_OK);
+    CHECK(sl_loader_map_image(&image, &mapped) == SL_OK);
+    CHECK(sl_loader_bind_imports(&image, &mapped, mock_import_resolver,
+                                 &resolver, &bound_count) == SL_OK);
+    CHECK(bound_count == 2U);
+    CHECK(get_u64(mapped.bytes, 0x1090U) == UINT64_C(0x180001000));
+    CHECK(get_u64(mapped.bytes, 0x1098U) == UINT64_C(0x180002000));
+    sl_loader_unmap_image(&mapped);
+
+    make_pe32_fixture(fixture);
+    CHECK(sl_pe_parse((sl_byte_view){fixture, sizeof(fixture)}, &image) ==
+          SL_OK);
+    CHECK(sl_loader_map_image(&image, &mapped) == SL_OK);
+    resolver.named_address = UINT64_C(0x00501000);
+    resolver.ordinal_address = UINT64_C(0x00502000);
+    CHECK(sl_loader_bind_imports(&image, &mapped, mock_import_resolver,
+                                 &resolver, &bound_count) == SL_OK);
+    CHECK(bound_count == 2U);
+    CHECK(get_u32(mapped.bytes, 0x1090U) == 0x00501000U);
+    CHECK(get_u32(mapped.bytes, 0x1094U) == 0x00502000U);
+    sl_loader_unmap_image(&mapped);
+
+    CHECK(sl_loader_map_image(&image, &mapped) == SL_OK);
+    resolver.fail_on_ordinal = true;
+    uint32_t original_name = get_u32(mapped.bytes, 0x1090U);
+    uint32_t original_ordinal = get_u32(mapped.bytes, 0x1094U);
+    CHECK(sl_loader_bind_imports(&image, &mapped, mock_import_resolver,
+                                 &resolver, &bound_count) ==
+          SL_ERROR_EXPORT_NOT_FOUND);
+    CHECK(bound_count == 0U);
+    CHECK(get_u32(mapped.bytes, 0x1090U) == original_name);
+    CHECK(get_u32(mapped.bytes, 0x1094U) == original_ordinal);
+    sl_loader_unmap_image(&mapped);
+    return true;
+}
+
 static bool test_rejects_malformed_files(void) {
     uint8_t fixture[FIXTURE_SIZE];
     sl_pe_image image;
@@ -475,6 +541,7 @@ int main(void) {
          test_relocation_failures_are_atomic},
         {"find exports", test_export_lookup},
         {"resolve modules and forwarders", test_module_registry_resolution},
+        {"bind IAT atomically", test_atomic_iat_binding},
         {"reject malformed files", test_rejects_malformed_files},
     };
     size_t passed = 0U;

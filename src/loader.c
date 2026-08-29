@@ -33,6 +33,69 @@ static void store_u64(uint8_t *data, uint64_t value) {
     store_u32(data + 4U, (uint32_t)(value >> 32U));
 }
 
+typedef struct {
+    uint32_t iat_rva;
+    uint64_t guest_address;
+} sl_pending_import;
+
+typedef struct {
+    size_t count;
+    bool overflow;
+} sl_import_count_context;
+
+typedef struct {
+    const sl_pe_image *image;
+    const sl_mapped_image *mapped;
+    sl_import_address_resolver resolver;
+    void *resolver_context;
+    sl_pending_import *pending;
+    size_t capacity;
+    size_t count;
+    sl_status status;
+} sl_import_resolve_context;
+
+static bool count_import_symbol(const sl_pe_import_symbol *import,
+                                void *context) {
+    (void)import;
+    sl_import_count_context *count = context;
+    if (count->count == SIZE_MAX) {
+        count->overflow = true;
+        return false;
+    }
+    ++count->count;
+    return true;
+}
+
+static bool resolve_import_symbol(const sl_pe_import_symbol *import,
+                                  void *context) {
+    sl_import_resolve_context *resolve = context;
+    size_t width = resolve->image->is_pe32_plus ? 8U : 4U;
+    if (resolve->count >= resolve->capacity ||
+        (size_t)import->iat_rva > resolve->mapped->size ||
+        width > resolve->mapped->size - (size_t)import->iat_rva ||
+        (size_t)import->iat_rva % width != 0U) {
+        resolve->status = SL_ERROR_INVALID_IMAGE;
+        return false;
+    }
+
+    uint64_t guest_address = 0U;
+    resolve->status =
+        resolve->resolver(import, &guest_address, resolve->resolver_context);
+    if (resolve->status != SL_OK) {
+        return false;
+    }
+    if (!resolve->image->is_pe32_plus && guest_address > UINT32_MAX) {
+        resolve->status = SL_ERROR_ADDRESS_OUT_OF_RANGE;
+        return false;
+    }
+    resolve->pending[resolve->count] = (sl_pending_import){
+        .iat_rva = import->iat_rva,
+        .guest_address = guest_address,
+    };
+    ++resolve->count;
+    return true;
+}
+
 static sl_status process_relocations(const sl_pe_image *image,
                                      sl_mapped_image *mapped,
                                      sl_pe_data_directory relocations,
@@ -179,6 +242,70 @@ sl_status sl_loader_apply_relocations(const sl_pe_image *image,
     }
     mapped->load_base = load_base;
     return SL_OK;
+}
+
+sl_status sl_loader_bind_imports(const sl_pe_image *image,
+                                 sl_mapped_image *mapped,
+                                 sl_import_address_resolver resolver,
+                                 void *context, size_t *bound_count) {
+    if (bound_count != NULL) {
+        *bound_count = 0U;
+    }
+    if (image == NULL || mapped == NULL || mapped->bytes == NULL ||
+        mapped->size != image->image_size || resolver == NULL) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+
+    sl_import_count_context count = {0U, false};
+    sl_status status =
+        sl_pe_for_each_import_symbol(image, count_import_symbol, &count);
+    if (status != SL_OK) {
+        return status;
+    }
+    if (count.overflow || count.count > SIZE_MAX / sizeof(sl_pending_import)) {
+        return SL_ERROR_OUT_OF_MEMORY;
+    }
+    if (count.count == 0U) {
+        return SL_OK;
+    }
+
+    sl_pending_import *pending = calloc(count.count, sizeof(*pending));
+    if (pending == NULL) {
+        return SL_ERROR_OUT_OF_MEMORY;
+    }
+    sl_import_resolve_context resolve = {
+        .image = image,
+        .mapped = mapped,
+        .resolver = resolver,
+        .resolver_context = context,
+        .pending = pending,
+        .capacity = count.count,
+        .count = 0U,
+        .status = SL_OK,
+    };
+    status = sl_pe_for_each_import_symbol(image, resolve_import_symbol, &resolve);
+    if (status == SL_OK && resolve.status != SL_OK) {
+        status = resolve.status;
+    }
+    if (status == SL_OK && resolve.count != count.count) {
+        status = SL_ERROR_INVALID_IMAGE;
+    }
+
+    if (status == SL_OK) {
+        for (size_t index = 0U; index < resolve.count; ++index) {
+            uint8_t *destination = mapped->bytes + pending[index].iat_rva;
+            if (image->is_pe32_plus) {
+                store_u64(destination, pending[index].guest_address);
+            } else {
+                store_u32(destination, (uint32_t)pending[index].guest_address);
+            }
+        }
+        if (bound_count != NULL) {
+            *bound_count = resolve.count;
+        }
+    }
+    free(pending);
+    return status;
 }
 
 void sl_loader_unmap_image(sl_mapped_image *mapped) {

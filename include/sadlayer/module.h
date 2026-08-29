@@ -37,6 +37,7 @@ const sl_loaded_module *sl_module_registry_find(
 sl_status sl_module_registry_resolve(const sl_module_registry *registry,
                                      const sl_pe_import_symbol *import,
                                      sl_resolved_symbol *result);
+sl_status sl_module_registry_import_resolver(
+    const sl_pe_import_symbol *import, uint64_t *guest_address, void *context);
 
 #endif
-
