@@ -1,0 +1,33 @@
+#include "sadlayer/error.h"
+
+const char *sl_status_string(sl_status status) {
+    switch (status) {
+    case SL_OK:
+        return "success";
+    case SL_ERROR_INVALID_ARGUMENT:
+        return "invalid argument";
+    case SL_ERROR_IO:
+        return "I/O error";
+    case SL_ERROR_OUT_OF_MEMORY:
+        return "out of memory";
+    case SL_ERROR_TRUNCATED_FILE:
+        return "truncated file";
+    case SL_ERROR_BAD_DOS_SIGNATURE:
+        return "invalid DOS signature";
+    case SL_ERROR_BAD_PE_SIGNATURE:
+        return "invalid PE signature";
+    case SL_ERROR_UNSUPPORTED_MACHINE:
+        return "unsupported CPU architecture";
+    case SL_ERROR_UNSUPPORTED_OPTIONAL_HEADER:
+        return "unsupported PE optional header";
+    case SL_ERROR_INVALID_IMAGE:
+        return "invalid PE image";
+    case SL_ERROR_RVA_NOT_MAPPED:
+        return "RVA is not backed by file data";
+    case SL_ERROR_NOT_IMPLEMENTED:
+        return "not implemented yet";
+    default:
+        return "unknown error";
+    }
+}
+

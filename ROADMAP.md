@@ -1,0 +1,130 @@
+# Roadmap to Hollow Knight
+
+The north-star test is the Windows build of Hollow Knight reaching its title
+screen, accepting keyboard/controller input, rendering correctly, and playing
+audio on an x86-64 Linux host. “Launch” is split into observable gates so each
+failure identifies the next subsystem instead of hiding behind one binary goal.
+
+Dates are intentionally omitted. Completion is based on exit criteria and test
+artifacts, not estimates made before the target binary has been profiled.
+
+## Stage 0 — Bootstrap and target inventory (current)
+
+Deliverables:
+
+- C11 project with dependency-free build and sanitizer-friendly tests;
+- bounds-checked PE32/PE32+ parsing, RVA translation, import discovery, and
+  section mapping;
+- `inspect`, `map`, and staged `run` commands;
+- a local, non-redistributed inventory of the target EXE/DLL architecture,
+  imports, PE features, and runtime logs.
+
+Exit gate: `sadlayer inspect` and `sadlayer map` succeed on the target executable
+without sanitizer findings. The inventory is recorded in an issue without
+shipping proprietary files.
+
+## Stage 1 — Correct PE loader and process bootstrap
+
+Implement, in order:
+
+1. Base relocations and deterministic image address selection.
+2. Import tables by name and ordinal, delay imports, forwarded exports, and a
+   module registry.
+3. Export parsing for built-in SadLayer DLL modules.
+4. TLS directory, callbacks, thread-local storage, and PE section protections.
+5. x86-64 Windows ABI thunks (`ms_abi`) and a guarded jump to the guest entry
+   point. Keep x86 parsing, but defer 32-bit execution to a separate process.
+6. Structured tracing for module load, symbol resolution, calls, and last error.
+
+Exit gate: a synthetic Windows fixture calls a built-in `kernel32` function from
+its real entry point and exits with the expected code.
+
+## Stage 2 — NT and kernel32 foundation
+
+Implement the minimum coherent process model rather than isolated stubs:
+
+- PEB/TEB-shaped guest state, command line, environment, current directory, and
+  Windows path normalization;
+- heap/virtual memory, handles, files, directories, mappings, clocks, waits,
+  events, mutexes, semaphores, and threads;
+- UTF-16 strings and code-page conversion;
+- errors, exceptions/unwind investigation, console/log output, module queries,
+  and dynamic symbol lookup;
+- registry overlay stored inside a SadLayer prefix.
+
+Exit gate: purpose-built PE conformance programs pass file, memory, threading,
+TLS, timing, environment, and loader tests under SadLayer.
+
+## Stage 3 — Unity/Mono startup surface
+
+Hollow Knight builds may differ, so the Stage 0 inventory decides the precise
+worklist. Expected families include:
+
+- `ntdll`, `kernel32`, `advapi32`, `user32`, `gdi32`, `shell32`, `ole32`,
+  `winmm`, and version/locale APIs;
+- child DLL loading and native plugin discovery;
+- enough window/message-loop, monitor, cursor, keyboard, and filesystem behavior
+  for Unity initialization;
+- crash reports containing the first unresolved symbol and guest stack context.
+
+Exit gate: the target initializes its engine/runtime, creates a window, and
+continues pumping messages without an unresolved bootstrap import.
+
+## Stage 4 — Graphics
+
+Start with the API selected by the actual target logs. The likely path is a
+DXGI/D3D11 compatibility frontend backed by Vulkan, implemented as distinct
+layers:
+
+- DXGI adapters, outputs, swap chains, presentation, and resize/fullscreen;
+- D3D11 resources, views, state objects, command submission, and synchronization;
+- DXBC inspection and shader translation with a growing differential corpus;
+- format/capability tables and explicit unsupported-feature diagnostics.
+
+An SDL-like window helper may be used later, but the core ABI remains owned by
+SadLayer. Third-party platform libraries require an explicit dependency review;
+Wine/Proton code is not imported.
+
+Exit gate: clear-color triangle, textured quad, and Unity startup render tests
+pass before the game reaches a stable title screen at correct colors and aspect.
+
+## Stage 5 — Audio and input
+
+- XAudio2/legacy audio surface chosen from target imports, backed by PipeWire or
+  ALSA;
+- XInput controller state, vibration, and hotplug;
+- Raw Input/keyboard/mouse mapping, focus, cursor capture, and layout behavior;
+- deterministic input and audio smoke tests independent of the game.
+
+Exit gate: title music is audible, keyboard and a controller navigate the menu,
+and focus/fullscreen transitions do not lose input.
+
+## Stage 6 — Playability and packaging
+
+- save/config paths, locale, achievements boundary, and controller persistence;
+- frame pacing, memory/performance profiling, shader cache, and startup cache;
+- isolated prefixes, per-game configuration, logs, crash dumps, and a launcher;
+- compatibility matrix covering distributions, GPU vendors, and multiple legal
+  game builds supplied by testers.
+
+Exit gate: start a new game, play through an initial gameplay checkpoint, save,
+restart, and load it with stable rendering, sound, and input.
+
+## Test strategy across every stage
+
+- Unit tests for parsers, tables, path rules, and state machines.
+- Tiny PE fixtures that exercise one Windows contract each.
+- Golden traces for loader/module behavior.
+- Fuzz every parser that consumes guest-controlled memory.
+- Game probes record hashes and metadata only; proprietary binaries never enter
+  the repository or CI.
+- CI runs warnings-as-errors and AddressSanitizer/UndefinedBehaviorSanitizer.
+
+## Explicit non-goals for the first playable milestone
+
+- 32-bit guest execution, ARM hosts, macOS, anti-cheat, installers, .NET desktop,
+  general Office application compatibility, and every DirectX generation.
+- Bit-for-bit Windows behavior where Unity/Hollow Knight does not observe it.
+- Pretending a stub is implemented: compatibility shims must return documented
+  failures and emit a trace until their behavior is real.
+

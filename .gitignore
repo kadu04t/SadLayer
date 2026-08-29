@@ -1,0 +1,8 @@
+/build/
+*.o
+*.d
+*.gcda
+*.gcno
+*.gcov
+compile_commands.json
+
