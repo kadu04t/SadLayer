@@ -30,9 +30,10 @@ static void print_usage(FILE *stream, const char *program) {
             "Usage:\n"
             "  %s inspect <program.exe>\n"
             "  %s imports <program.exe>\n"
+            "  %s resolve-export <library.dll> <name|#ordinal>\n"
             "  %s map <program.exe>\n"
             "  %s run <program.exe>\n",
-            program, program, program, program);
+            program, program, program, program, program);
 }
 
 static sl_status read_entire_file(const char *path, owned_file *file) {
@@ -144,6 +145,40 @@ static sl_status inspect_import_symbols(const sl_pe_image *image) {
     return SL_OK;
 }
 
+static sl_status inspect_export(const sl_pe_image *image, const char *query) {
+    sl_pe_export export;
+    sl_status status = SL_OK;
+    if (query[0] == '#') {
+        char *end = NULL;
+        errno = 0;
+        unsigned long value = strtoul(query + 1, &end, 10);
+        if (query[1] == '\0' || end == NULL || *end != '\0' || errno != 0 ||
+            value > UINT32_MAX) {
+            return SL_ERROR_INVALID_ARGUMENT;
+        }
+        status = sl_pe_find_export_by_ordinal(image, (uint32_t)value, &export);
+    } else {
+        status = sl_pe_find_export_by_name(image, query, &export);
+    }
+    if (status != SL_OK) {
+        return status;
+    }
+
+    printf("Export:       %s\n", export.name != NULL ? export.name : query);
+    printf("Ordinal:      %" PRIu32 "\n", export.ordinal);
+    printf("RVA:          0x%08" PRIx32 "\n", export.rva);
+    if (export.is_forwarder) {
+        printf("Forwarder:    %s\n", export.forwarder);
+    } else {
+        if (image->image_base > UINT64_MAX - export.rva) {
+            return SL_ERROR_INVALID_IMAGE;
+        }
+        printf("Guest VA:     0x%016" PRIx64 "\n",
+               image->image_base + export.rva);
+    }
+    return SL_OK;
+}
+
 static sl_status map_image(const sl_pe_image *image) {
     sl_mapped_image mapped = {0};
     sl_status status = sl_loader_map_image(image, &mapped);
@@ -157,15 +192,17 @@ static sl_status map_image(const sl_pe_image *image) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 3) {
+    if (argc < 3 || argc > 4) {
         print_usage(stderr, argv[0]);
         return 2;
     }
     bool inspect = strcmp(argv[1], "inspect") == 0;
     bool list_imports = strcmp(argv[1], "imports") == 0;
+    bool resolve_export = strcmp(argv[1], "resolve-export") == 0;
     bool map = strcmp(argv[1], "map") == 0;
     bool run = strcmp(argv[1], "run") == 0;
-    if (!inspect && !list_imports && !map && !run) {
+    if ((!resolve_export && argc != 3) || (resolve_export && argc != 4) ||
+        (!inspect && !list_imports && !resolve_export && !map && !run)) {
         print_usage(stderr, argv[0]);
         return 2;
     }
@@ -183,6 +220,8 @@ int main(int argc, char **argv) {
         status = inspect_image(&image);
     } else if (status == SL_OK && list_imports) {
         status = inspect_import_symbols(&image);
+    } else if (status == SL_OK && resolve_export) {
+        status = inspect_export(&image, argv[3]);
     } else if (status == SL_OK) {
         status = map_image(&image);
         if (status == SL_OK && run) {
