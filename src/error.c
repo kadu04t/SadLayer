@@ -26,6 +26,16 @@ const char *sl_status_string(sl_status status) {
         return "RVA is not backed by file data";
     case SL_ERROR_EXPORT_NOT_FOUND:
         return "PE export was not found";
+    case SL_ERROR_MODULE_NOT_FOUND:
+        return "imported module was not found";
+    case SL_ERROR_DUPLICATE_MODULE:
+        return "module is already registered";
+    case SL_ERROR_MODULE_REGISTRY_FULL:
+        return "module registry is full";
+    case SL_ERROR_INVALID_FORWARDER:
+        return "invalid PE export forwarder";
+    case SL_ERROR_FORWARDER_LIMIT:
+        return "PE export forwarder limit reached";
     case SL_ERROR_RELOCATION_REQUIRED:
         return "image cannot be loaded away from its preferred base";
     case SL_ERROR_UNSUPPORTED_RELOCATION:

@@ -4,7 +4,7 @@ CPPFLAGS ?= -Iinclude
 CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror -O2
 LDFLAGS ?=
 
-LIB_SOURCES := src/error.c src/pe.c src/loader.c src/win32.c
+LIB_SOURCES := src/error.c src/pe.c src/loader.c src/module.c src/win32.c
 CLI_SOURCES := src/main.c
 TEST_SOURCES := tests/test_pe.c
 LIB_OBJECTS := $(LIB_SOURCES:%.c=$(BUILD_DIR)/%.o)

@@ -1,4 +1,5 @@
 #include "sadlayer/loader.h"
+#include "sadlayer/module.h"
 #include "sadlayer/pe.h"
 
 #include <stdbool.h>
@@ -381,6 +382,65 @@ static bool test_export_lookup(void) {
     return true;
 }
 
+static bool test_module_registry_resolution(void) {
+    uint8_t unity_fixture[FIXTURE_SIZE];
+    uint8_t kernel_fixture[FIXTURE_SIZE];
+    sl_pe_image unity_image;
+    sl_pe_image kernel_image;
+    sl_mapped_image unity_mapped = {0};
+    sl_mapped_image kernel_mapped = {0};
+    sl_module_registry registry;
+    sl_resolved_symbol resolved;
+
+    make_pe64_fixture(unity_fixture);
+    make_pe64_fixture(kernel_fixture);
+    memcpy(kernel_fixture + 0x340U, "Sleep\0\0\0\0\0\0", 11U);
+    CHECK(sl_pe_parse((sl_byte_view){unity_fixture, sizeof(unity_fixture)},
+                      &unity_image) == SL_OK);
+    CHECK(sl_pe_parse((sl_byte_view){kernel_fixture, sizeof(kernel_fixture)},
+                      &kernel_image) == SL_OK);
+    CHECK(sl_loader_map_image(&unity_image, &unity_mapped) == SL_OK);
+    CHECK(sl_loader_map_image(&kernel_image, &kernel_mapped) == SL_OK);
+
+    sl_module_registry_init(&registry);
+    CHECK(sl_module_registry_add(&registry, "UnityPlayer.dll", &unity_image,
+                                 &unity_mapped) == SL_OK);
+    CHECK(sl_module_registry_add(&registry, "KERNEL32.dll", &kernel_image,
+                                 &kernel_mapped) == SL_OK);
+    CHECK(sl_module_registry_add(&registry, "kernel32.DLL", &kernel_image,
+                                 &kernel_mapped) ==
+          SL_ERROR_DUPLICATE_MODULE);
+
+    sl_pe_import_symbol import = {
+        .module_name = "unityplayer.DLL",
+        .symbol_name = "UnityMain2",
+        .iat_rva = 0U,
+        .hint = 0U,
+        .ordinal = 0U,
+        .by_ordinal = false,
+    };
+    CHECK(sl_module_registry_resolve(&registry, &import, &resolved) == SL_OK);
+    CHECK(resolved.module == &registry.modules[0]);
+    CHECK(resolved.guest_address == unity_mapped.load_base + 0x1050U);
+    CHECK(resolved.forward_depth == 0U);
+
+    import.symbol_name = NULL;
+    import.ordinal = 2U;
+    import.by_ordinal = true;
+    CHECK(sl_module_registry_resolve(&registry, &import, &resolved) == SL_OK);
+    CHECK(resolved.module == &registry.modules[1]);
+    CHECK(strcmp(resolved.export.name, "Sleep") == 0);
+    CHECK(resolved.guest_address == kernel_mapped.load_base + 0x1050U);
+    CHECK(resolved.forward_depth == 1U);
+
+    import.module_name = "missing.dll";
+    CHECK(sl_module_registry_resolve(&registry, &import, &resolved) ==
+          SL_ERROR_MODULE_NOT_FOUND);
+    sl_loader_unmap_image(&kernel_mapped);
+    sl_loader_unmap_image(&unity_mapped);
+    return true;
+}
+
 static bool test_rejects_malformed_files(void) {
     uint8_t fixture[FIXTURE_SIZE];
     sl_pe_image image;
@@ -414,6 +474,7 @@ int main(void) {
         {"reject invalid relocations atomically",
          test_relocation_failures_are_atomic},
         {"find exports", test_export_lookup},
+        {"resolve modules and forwarders", test_module_registry_resolution},
         {"reject malformed files", test_rejects_malformed_files},
     };
     size_t passed = 0U;
