@@ -1,4 +1,5 @@
 #include "sadlayer/loader.h"
+#include "sadlayer/module.h"
 #include "sadlayer/pe.h"
 #include "sadlayer/win32.h"
 
@@ -24,6 +25,13 @@ typedef struct {
     size_t ordinal_count;
 } symbol_summary;
 
+typedef struct {
+    const sl_module_registry *registry;
+    size_t resolved_count;
+    size_t unresolved_count;
+    sl_status fatal_status;
+} link_summary;
+
 static void print_usage(FILE *stream, const char *program) {
     fprintf(stream,
             "SadLayer - experimental Windows compatibility layer\n\n"
@@ -31,9 +39,10 @@ static void print_usage(FILE *stream, const char *program) {
             "  %s inspect <program.exe>\n"
             "  %s imports <program.exe>\n"
             "  %s resolve-export <library.dll> <name|#ordinal>\n"
+            "  %s link-check <program.exe> <library.dll>\n"
             "  %s map <program.exe>\n"
             "  %s run <program.exe>\n",
-            program, program, program, program, program);
+            program, program, program, program, program, program);
 }
 
 static sl_status read_entire_file(const char *path, owned_file *file) {
@@ -179,6 +188,112 @@ static sl_status inspect_export(const sl_pe_image *image, const char *query) {
     return SL_OK;
 }
 
+static const char *path_basename(const char *path) {
+    const char *basename = path;
+    for (const char *cursor = path; *cursor != '\0'; ++cursor) {
+        if (*cursor == '/' || *cursor == '\\') {
+            basename = cursor + 1;
+        }
+    }
+    return basename;
+}
+
+static bool print_link_result(const sl_pe_import_symbol *import,
+                              void *context) {
+    link_summary *summary = context;
+    sl_resolved_symbol resolved;
+    sl_status status =
+        sl_module_registry_resolve(summary->registry, import, &resolved);
+    if (status == SL_OK) {
+        printf("  resolved   %s!", import->module_name);
+        if (import->by_ordinal) {
+            printf("#%u", import->ordinal);
+        } else {
+            printf("%s", import->symbol_name);
+        }
+        printf(" -> %s+0x%08" PRIx32 " (0x%016" PRIx64 ")\n",
+               resolved.module->name, resolved.export.rva,
+               resolved.guest_address);
+        ++summary->resolved_count;
+        return true;
+    }
+    if (status == SL_ERROR_MODULE_NOT_FOUND ||
+        status == SL_ERROR_EXPORT_NOT_FOUND) {
+        printf("  unresolved %s!", import->module_name);
+        if (import->by_ordinal) {
+            printf("#%u", import->ordinal);
+        } else {
+            printf("%s", import->symbol_name);
+        }
+        printf(" (%s)\n", sl_status_string(status));
+        ++summary->unresolved_count;
+        return true;
+    }
+    summary->fatal_status = status;
+    return false;
+}
+
+static sl_status check_link(const sl_pe_image *program_image,
+                            const char *library_path) {
+    owned_file library_file = {0};
+    sl_pe_image library_image;
+    sl_mapped_image program_mapped = {0};
+    sl_mapped_image library_mapped = {0};
+    sl_module_registry registry;
+    sl_status status = read_entire_file(library_path, &library_file);
+    if (status != SL_OK) {
+        return status;
+    }
+    status = sl_pe_parse(
+        (sl_byte_view){library_file.data, library_file.size}, &library_image);
+    if (status == SL_OK) {
+        status = sl_loader_map_image(program_image, &program_mapped);
+    }
+    if (status == SL_OK) {
+        status = sl_loader_map_image(&library_image, &library_mapped);
+    }
+
+    const char *library_name = path_basename(library_path);
+    if (status == SL_OK && library_name[0] == '\0') {
+        status = SL_ERROR_INVALID_ARGUMENT;
+    }
+    if (status == SL_OK) {
+        sl_module_registry_init(&registry);
+        status = sl_module_registry_add(&registry, library_name, &library_image,
+                                        &library_mapped);
+    }
+
+    link_summary summary = {&registry, 0U, 0U, SL_OK};
+    if (status == SL_OK) {
+        printf("Link check with module %s:\n", library_name);
+        status = sl_pe_for_each_import_symbol(program_image, print_link_result,
+                                              &summary);
+        if (status == SL_OK && summary.fatal_status != SL_OK) {
+            status = summary.fatal_status;
+        }
+    }
+    if (status == SL_OK && summary.unresolved_count == 0U) {
+        size_t bound_count = 0U;
+        status = sl_loader_bind_imports(
+            program_image, &program_mapped, sl_module_registry_import_resolver,
+            &registry, &bound_count);
+        if (status == SL_OK) {
+            printf("IAT binding complete: %zu symbols written.\n", bound_count);
+        }
+    } else if (status == SL_OK) {
+        puts("IAT binding skipped: unresolved symbols leave the image unchanged.");
+    }
+    if (status == SL_OK) {
+        printf("Link coverage: %zu resolved, %zu unresolved.\n",
+               summary.resolved_count, summary.unresolved_count);
+    }
+
+    sl_loader_unmap_image(&library_mapped);
+    sl_loader_unmap_image(&program_mapped);
+    free(library_file.data);
+    return status;
+}
+
 static sl_status map_image(const sl_pe_image *image) {
     sl_mapped_image mapped = {0};
     sl_status status = sl_loader_map_image(image, &mapped);
@@ -199,10 +314,13 @@ int main(int argc, char **argv) {
     bool inspect = strcmp(argv[1], "inspect") == 0;
     bool list_imports = strcmp(argv[1], "imports") == 0;
     bool resolve_export = strcmp(argv[1], "resolve-export") == 0;
+    bool link_check = strcmp(argv[1], "link-check") == 0;
     bool map = strcmp(argv[1], "map") == 0;
     bool run = strcmp(argv[1], "run") == 0;
-    if ((!resolve_export && argc != 3) || (resolve_export && argc != 4) ||
-        (!inspect && !list_imports && !resolve_export && !map && !run)) {
+    bool needs_two_paths = resolve_export || link_check;
+    if ((!needs_two_paths && argc != 3) || (needs_two_paths && argc != 4) ||
+        (!inspect && !list_imports && !resolve_export && !link_check && !map &&
+         !run)) {
         print_usage(stderr, argv[0]);
         return 2;
     }
@@ -222,6 +340,8 @@ int main(int argc, char **argv) {
         status = inspect_import_symbols(&image);
     } else if (status == SL_OK && resolve_export) {
         status = inspect_export(&image, argv[3]);
+    } else if (status == SL_OK && link_check) {
+        status = check_link(&image, argv[3]);
     } else if (status == SL_OK) {
         status = map_image(&image);
         if (status == SL_OK && run) {
