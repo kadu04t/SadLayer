@@ -33,8 +33,10 @@ Implement, in order:
 - [x] Base relocations for PE32/PE32+ images.
 - [x] Import enumeration by name and ordinal.
 - [x] Export lookup by name and ordinal, including forwarded exports.
+- [x] Case-insensitive module registry and forwarder traversal.
+- [x] Atomic IAT binding for PE32 and PE32+.
 - [ ] Deterministic guest address selection and executable memory mapping.
-- [ ] IAT binding, delay imports, forwarder traversal, and a module registry.
+- [ ] Recursive DLL discovery, delay imports, and API Set contracts.
 - [ ] TLS directory, callbacks, thread-local storage, and PE section protections.
 - [ ] x86-64 Windows ABI thunks (`ms_abi`) and a guarded jump to the guest entry
   point. Keep x86 parsing, but defer 32-bit execution to a separate process.

@@ -20,11 +20,13 @@ The bootstrap can already:
 - translate RVAs to file offsets;
 - map headers and sections into an in-memory image;
 - apply PE32 `HIGHLOW` and PE32+ `DIR64` base relocations atomically;
+- register mapped DLLs and resolve forwarded symbols across modules;
+- bind PE32/PE32+ import address tables without partial writes;
 - classify the first Win32 DLL targets needed by the runtime;
 - reject malformed and unsupported images with explicit errors.
 
-Import binding, module loading, TLS, Win32 calls, and guest execution are the
-next stages. See [ROADMAP.md](ROADMAP.md) for the ordered compatibility plan and
+Recursive module loading, API Sets, TLS, Win32 calls, and guest execution are
+the next stages. See [ROADMAP.md](ROADMAP.md) for the ordered compatibility plan and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries.
 
 ## Build
@@ -42,6 +44,7 @@ Useful commands:
 ./build/sadlayer inspect /path/to/game.exe
 ./build/sadlayer imports /path/to/UnityPlayer.dll
 ./build/sadlayer resolve-export /path/to/UnityPlayer.dll UnityMain2
+./build/sadlayer link-check /path/to/hollow_knight.exe /path/to/UnityPlayer.dll
 ./build/sadlayer map /path/to/game.exe
 ./build/sadlayer run /path/to/game.exe
 make sanitize
@@ -54,6 +57,10 @@ In a container or debugger where LeakSanitizer cannot attach, use
 execution handoff milestone is implemented. Its exit code is `3` in that case,
 which makes automation distinguish “valid but not runnable yet” from malformed
 input.
+
+`link-check` registers the supplied DLL, reports which executable imports it can
+resolve, and binds the IAT only when every import is available. An incomplete
+check never leaves a partially modified image.
 
 ## First Hollow Knight probe
 

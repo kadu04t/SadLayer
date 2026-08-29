@@ -25,9 +25,12 @@ guest x86-64 entry point            NT/process object model
 - `pe`: immutable, bounds-checked views of PE metadata. It never takes ownership
   of the file buffer and never executes guest data.
 - `loader`: creates the zero-filled virtual image and copies PE headers/sections
-  to their RVAs. Relocations and final memory protections belong here next.
-- `win32`: declares the import resolver boundary and identifies bootstrap module
-  names. Implementations of built-in DLLs will live below this boundary.
+  to their RVAs, applies base relocations, and atomically binds resolved imports.
+  Executable mappings and final memory protections belong here next.
+- `module`: tracks borrowed mapped images, resolves exports without regard to DLL
+  name casing, and follows bounded export-forwarder chains.
+- `win32`: identifies bootstrap module names. Implementations of built-in DLLs
+  will live below this boundary.
 - CLI: owns files, prints target inventory, and exposes individual loader gates.
 
 Public headers live under `include/sadlayer`; implementations live under `src`.
@@ -53,4 +56,3 @@ termination, access, and lifetime checks are mandatory at the boundary. The
 runtime is not initially a security sandbox, so only trusted game binaries should
 be executed. Process isolation and syscall restriction come after functional
 process bootstrap but before recommending general third-party binaries.
-
