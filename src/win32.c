@@ -1,7 +1,14 @@
 #include "sadlayer/win32.h"
 
-#include <ctype.h>
 #include <string.h>
+
+static unsigned char ascii_fold(unsigned char character) {
+    if (character >= (unsigned char)'A' && character <= (unsigned char)'Z') {
+        return (unsigned char)(character + ((unsigned char)'a' -
+                                             (unsigned char)'A'));
+    }
+    return character;
+}
 
 static bool ascii_equal_ignore_case(const char *left, const char *right) {
     if (left == NULL || right == NULL) {
@@ -10,7 +17,7 @@ static bool ascii_equal_ignore_case(const char *left, const char *right) {
     while (*left != '\0' && *right != '\0') {
         unsigned char left_char = (unsigned char)*left;
         unsigned char right_char = (unsigned char)*right;
-        if (tolower(left_char) != tolower(right_char)) {
+        if (ascii_fold(left_char) != ascii_fold(right_char)) {
             return false;
         }
         ++left;
@@ -34,4 +41,3 @@ bool sl_win32_is_bootstrap_module(const char *module_name) {
     }
     return false;
 }
-

@@ -441,6 +441,78 @@ static bool test_module_registry_resolution(void) {
     return true;
 }
 
+static bool test_native_module_resolution(void) {
+    static const sl_native_export exports[] = {
+        {.name = "Sleep",
+         .forwarder = NULL,
+         .ordinal = 1U,
+         .has_ordinal = true,
+         .guest_address = UINT64_C(0x70001000)},
+        {.name = "SleepAlias",
+         .forwarder = "KERNEL32.Sleep",
+         .ordinal = 2U,
+         .has_ordinal = true,
+         .guest_address = 0U},
+        {.name = "OrdinalAlias",
+         .forwarder = "KERNEL32.#1",
+         .ordinal = 3U,
+         .has_ordinal = true,
+         .guest_address = 0U},
+        {.name = "QualifiedAlias",
+         .forwarder = "KERNEL32.dll.Sleep",
+         .ordinal = 4U,
+         .has_ordinal = true,
+         .guest_address = 0U},
+    };
+    sl_module_registry registry;
+    sl_resolved_symbol resolved;
+    sl_module_registry_init(&registry);
+    CHECK(sl_module_registry_add_native(
+              &registry, "KERNEL32.dll", exports,
+              sizeof(exports) / sizeof(exports[0])) == SL_OK);
+
+    sl_pe_import_symbol import = {
+        .module_name = "kernel32.DLL",
+        .symbol_name = "Sleep",
+        .iat_rva = 0U,
+        .hint = 0U,
+        .ordinal = 0U,
+        .by_ordinal = false,
+    };
+    CHECK(sl_module_registry_resolve(&registry, &import, &resolved) == SL_OK);
+    CHECK(resolved.is_native);
+    CHECK(resolved.guest_address == UINT64_C(0x70001000));
+    CHECK(resolved.forward_depth == 0U);
+
+    sl_module_symbol query = {
+        .module_name = "KERNEL32.dll",
+        .symbol_name = "SleepAlias",
+        .ordinal = 0U,
+        .by_ordinal = false,
+    };
+    CHECK(sl_module_registry_resolve_symbol(&registry, &query, &resolved) ==
+          SL_OK);
+    CHECK(resolved.guest_address == UINT64_C(0x70001000));
+    CHECK(resolved.forward_depth == 1U);
+
+    import.symbol_name = NULL;
+    import.ordinal = 2U;
+    import.by_ordinal = true;
+    CHECK(sl_module_registry_resolve(&registry, &import, &resolved) == SL_OK);
+    CHECK(resolved.is_native);
+    CHECK(strcmp(resolved.export.name, "Sleep") == 0);
+    CHECK(resolved.guest_address == UINT64_C(0x70001000));
+    CHECK(resolved.forward_depth == 1U);
+
+    import.ordinal = 3U;
+    CHECK(sl_module_registry_resolve(&registry, &import, &resolved) == SL_OK);
+    CHECK(resolved.guest_address == UINT64_C(0x70001000));
+    import.ordinal = 4U;
+    CHECK(sl_module_registry_resolve(&registry, &import, &resolved) == SL_OK);
+    CHECK(resolved.guest_address == UINT64_C(0x70001000));
+    return true;
+}
+
 typedef struct {
     bool fail_on_ordinal;
     uint64_t named_address;
@@ -570,6 +642,7 @@ int main(void) {
          test_relocation_failures_are_atomic},
         {"find exports", test_export_lookup},
         {"resolve modules and forwarders", test_module_registry_resolution},
+        {"resolve native modules", test_native_module_resolution},
         {"bind IAT atomically", test_atomic_iat_binding},
         {"bind IAT from module registry", test_registry_backed_iat_binding},
         {"reject malformed files", test_rejects_malformed_files},

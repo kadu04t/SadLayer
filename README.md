@@ -20,18 +20,40 @@ The bootstrap can already:
 - translate RVAs to file offsets;
 - map headers and sections into an in-memory image;
 - apply PE32 `HIGHLOW` and PE32+ `DIR64` base relocations atomically;
-- register mapped DLLs and resolve forwarded symbols across modules;
+- register mapped PE and native modules and resolve mixed forwarder chains;
 - bind PE32/PE32+ import address tables without partial writes;
+- expose an initial 54-export `KERNEL32.dll` subset through x86-64 `ms_abi`
+  thunks for last-error state, time/identity, heap, TLS, no-fiber FLS, critical
+  sections, text conversion, process strings, locale basics, standard streams,
+  pointer encoding, and process termination;
+- create explicit guest process objects with an OS-random pointer cookie used by
+  the reversible `EncodePointer`/`DecodePointer` pair;
+- convert explicit-length UTF-8/UTF-16 strictly or with replacement, without
+  exposing Linux `wchar_t` at the Windows boundary;
+- install nestable per-thread runtime contexts and route last-error/thread
+  identity through them;
 - classify the first Win32 DLL targets needed by the runtime;
 - reject malformed and unsupported images with explicit errors.
 
-Recursive module loading, API Sets, TLS, Win32 calls, and guest execution are
-the next stages. See [ROADMAP.md](ROADMAP.md) for the ordered compatibility plan and
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries.
+The native KERNEL32 surface is a host-backed bootstrap subset, not a complete
+Windows process environment. Its thunks are exercised directly by unit tests;
+no PE entry point calls them yet. PE images are still allocation-backed and
+non-executable, and `UnityPlayer.dll` and its dependencies are not linked
+recursively.
+
+FLS currently models one implicit fiber per host thread. Fiber switching and
+process-wide callback enumeration are still pending, so the FLS surface is
+classified as partial even though its symbols are available.
+
+Executable address-stable mappings, recursive DLL loading, API Sets, PE TLS,
+PEB/TEB state, exception/unwind support, and guarded guest execution are the next
+loader milestones. See [ROADMAP.md](ROADMAP.md) for the ordered compatibility
+plan and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries.
 
 ## Build
 
-Requirements: a C11 compiler and GNU Make.
+Requirements: x86-64 Linux, a GCC/Clang-compatible C11 compiler, GNU Make, and
+POSIX threads.
 
 ```sh
 make
@@ -58,9 +80,13 @@ execution handoff milestone is implemented. Its exit code is `3` in that case,
 which makes automation distinguish “valid but not runnable yet” from malformed
 input.
 
-`link-check` registers the supplied DLL, reports which executable imports it can
-resolve, and binds the IAT only when every import is available. An incomplete
-check never leaves a partially modified image.
+`link-check` registers the supplied PE DLL and SadLayer's built-in KERNEL32,
+reports which executable imports it can resolve, and binds the IAT only when
+every import is available. It does not recursively bind the supplied library's
+own imports; in particular, resolving the launcher does not mean UnityPlayer's
+522 imports are ready. Resolution is an address-level result, not a claim of
+complete behavioral conformance for every thunk. An incomplete check never
+leaves a partially modified image.
 
 ## First Hollow Knight probe
 

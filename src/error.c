@@ -25,7 +25,7 @@ const char *sl_status_string(sl_status status) {
     case SL_ERROR_RVA_NOT_MAPPED:
         return "RVA is not backed by file data";
     case SL_ERROR_EXPORT_NOT_FOUND:
-        return "PE export was not found";
+        return "export was not found";
     case SL_ERROR_MODULE_NOT_FOUND:
         return "imported module was not found";
     case SL_ERROR_DUPLICATE_MODULE:
@@ -33,11 +33,15 @@ const char *sl_status_string(sl_status status) {
     case SL_ERROR_MODULE_REGISTRY_FULL:
         return "module registry is full";
     case SL_ERROR_INVALID_FORWARDER:
-        return "invalid PE export forwarder";
+        return "invalid export forwarder";
     case SL_ERROR_FORWARDER_LIMIT:
-        return "PE export forwarder limit reached";
+        return "export forwarder limit reached";
     case SL_ERROR_ADDRESS_OUT_OF_RANGE:
         return "resolved guest address does not fit the image architecture";
+    case SL_ERROR_INVALID_ENCODING:
+        return "invalid Unicode encoding";
+    case SL_ERROR_BUFFER_TOO_SMALL:
+        return "destination buffer is too small";
     case SL_ERROR_RELOCATION_REQUIRED:
         return "image cannot be loaded away from its preferred base";
     case SL_ERROR_UNSUPPORTED_RELOCATION:

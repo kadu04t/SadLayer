@@ -21,6 +21,17 @@ import inventory currently finds 522 symbols: 484 by name and 38 by ordinal.
 The launcher imports `UnityMain2`; SadLayer resolves it to export ordinal 2 at
 RVA `0x7da7a0` in this `UnityPlayer.dll`.
 
+With the built-in KERNEL32 bootstrap subset enabled, the current launcher-only
+link check resolves 53 symbols and leaves 19 unresolved. The unresolved set is
+concentrated in x64 exception/unwind, dynamic module management, filesystem
+search/file positioning, and file creation. IAT binding remains intentionally
+skipped until the entire launcher import set resolves atomically.
+
+The launcher's CRT path reads `GS:[0x30]` and `GS:[0x60]` before reaching
+`UnityMain2`, then consumes TEB stack bounds and PEB process parameters. A
+GS-backed synthetic TEB/PEB is therefore a measured entry-point requirement,
+not merely a later compatibility enhancement.
+
 ## Direct UnityPlayer modules
 
 - Process/runtime: `KERNEL32`, `ADVAPI32`, `VERSION`, `SHLWAPI`, `SETUPAPI`.

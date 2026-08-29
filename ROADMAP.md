@@ -34,12 +34,13 @@ Implement, in order:
 - [x] Import enumeration by name and ordinal.
 - [x] Export lookup by name and ordinal, including forwarded exports.
 - [x] Case-insensitive module registry and forwarder traversal.
+- [x] Native module registration and mixed PE/native export forwarding.
 - [x] Atomic IAT binding for PE32 and PE32+.
-- [ ] Deterministic guest address selection and executable memory mapping.
+- [x] Initial x86-64 `ms_abi` thunk declarations and direct ABI smoke tests.
+- [ ] Address-stable executable mappings, final PE section protections, and a
+  guarded `ms_abi` handoff to a synthetic guest entry point.
 - [ ] Recursive DLL discovery, delay imports, and API Set contracts.
-- [ ] TLS directory, callbacks, thread-local storage, and PE section protections.
-- [ ] x86-64 Windows ABI thunks (`ms_abi`) and a guarded jump to the guest entry
-  point. Keep x86 parsing, but defer 32-bit execution to a separate process.
+- [ ] PE TLS directory, callbacks, and per-module thread data.
 - [ ] Structured tracing for module load, symbol resolution, calls, and last
   error.
 
@@ -50,17 +51,40 @@ its real entry point and exits with the expected code.
 
 Implement the minimum coherent process model rather than isolated stubs:
 
-- PEB/TEB-shaped guest state, command line, environment, current directory, and
-  Windows path normalization;
-- heap/virtual memory, handles, files, directories, mappings, clocks, waits,
-  events, mutexes, semaphores, and threads;
-- UTF-16 strings and code-page conversion;
-- errors, exceptions/unwind investigation, console/log output, module queries,
-  and dynamic symbol lookup;
-- registry overlay stored inside a SadLayer prefix.
+- [x] Initial host-backed KERNEL32 subset: last-error, identity/time, process
+  heap, TLS and no-fiber FLS, critical sections, code-page queries and
+  conversions, process strings, pointer encoding, basic locale
+  classification/casing, standard streams, and process exit.
+- [x] Explicit guest process object with an OS-random pointer cookie and
+  reversible `EncodePointer`/`DecodePointer` behavior.
+- [x] Validated explicit-length UTF-8/UTF-16 conversion primitives.
+- [x] Nestable native thread context for last-error/thread identity and the
+  future process object.
+- [ ] Guest PEB/TEB state, PE TLS directory/callbacks, validated guest pointers,
+  and coherent handles/object lifetimes.
+- [ ] Fiber contexts and process-wide FLS callback enumeration.
+- [ ] Current directory, Windows path normalization, virtual memory, files,
+  directories, mappings, waits, synchronization objects, and threads.
+- [ ] Remaining launcher imports: dynamic module lookup, filesystem/search, and
+  x64 exception/unwind APIs.
+- [ ] Registry overlay stored inside a SadLayer prefix.
 
 Exit gate: purpose-built PE conformance programs pass file, memory, threading,
 TLS, timing, environment, and loader tests under SadLayer.
+
+### Immediate blockers before a controlled Hollow Knight handoff
+
+1. Map PE images at their real process addresses with executable/read/write
+   protections instead of treating `load_base` as metadata over `calloc`.
+2. Install a GS-backed synthetic TEB/PEB, stack bounds, process parameters, and
+   validated guest-pointer access before transferring control to guest code.
+3. Run a synthetic PE entry-point fixture under guarded signal/crash tracing.
+4. Complete the launcher's remaining KERNEL32 imports through coherent module,
+   handle/filesystem, and x64 exception/unwind subsystems.
+5. Recursively load, relocate, and bind UnityPlayer and its dependency graph; the
+   current link check only examines the executable.
+6. Resolve API Set contracts and implement DLL initialization order, `DllMain`,
+   PE TLS data, and TLS callbacks.
 
 ## Stage 3 — Unity/Mono startup surface
 

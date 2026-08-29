@@ -1,3 +1,4 @@
+#include "sadlayer/kernel32.h"
 #include "sadlayer/loader.h"
 #include "sadlayer/module.h"
 #include "sadlayer/pe.h"
@@ -211,9 +212,14 @@ static bool print_link_result(const sl_pe_import_symbol *import,
         } else {
             printf("%s", import->symbol_name);
         }
-        printf(" -> %s+0x%08" PRIx32 " (0x%016" PRIx64 ")\n",
-               resolved.module->name, resolved.export.rva,
-               resolved.guest_address);
+        if (resolved.is_native) {
+            printf(" -> %s[native] (0x%016" PRIx64 ")\n",
+                   resolved.module->name, resolved.guest_address);
+        } else {
+            printf(" -> %s+0x%08" PRIx32 " (0x%016" PRIx64 ")\n",
+                   resolved.module->name, resolved.export.rva,
+                   resolved.guest_address);
+        }
         ++summary->resolved_count;
         return true;
     }
@@ -261,6 +267,10 @@ static sl_status check_link(const sl_pe_image *program_image,
         sl_module_registry_init(&registry);
         status = sl_module_registry_add(&registry, library_name, &library_image,
                                         &library_mapped);
+    }
+    if (status == SL_OK &&
+        sl_module_registry_find(&registry, "KERNEL32.dll") == NULL) {
+        status = sl_kernel32_register(&registry);
     }
 
     link_summary summary = {&registry, 0U, 0U, SL_OK};

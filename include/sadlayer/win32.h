@@ -7,6 +7,12 @@
 
 #include "sadlayer/error.h"
 
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#define SL_WINAPI __attribute__((ms_abi))
+#else
+#define SL_WINAPI
+#endif
+
 typedef struct {
     const char *module;
     const char *symbol;
@@ -20,4 +26,3 @@ typedef sl_status (*sl_win32_resolver)(const sl_win32_import *import,
 bool sl_win32_is_bootstrap_module(const char *module_name);
 
 #endif
-
