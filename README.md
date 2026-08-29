@@ -15,6 +15,7 @@ The bootstrap can already:
 
 - validate PE32 and PE32+ headers with bounds checks;
 - describe architecture, subsystem, entry point, sections, and imported DLLs;
+- enumerate imported symbols by name or ordinal and report their IAT RVAs;
 - translate RVAs to file offsets;
 - map headers and sections into an in-memory image;
 - classify the first Win32 DLL targets needed by the runtime;
@@ -37,6 +38,7 @@ Useful commands:
 
 ```sh
 ./build/sadlayer inspect /path/to/game.exe
+./build/sadlayer imports /path/to/UnityPlayer.dll
 ./build/sadlayer map /path/to/game.exe
 ./build/sadlayer run /path/to/game.exe
 make sanitize
@@ -52,13 +54,17 @@ input.
 
 ## First Hollow Knight probe
 
-Point `inspect` at the Windows game executable and save the output in an issue.
-Do not commit the game or any proprietary DLL. The report establishes the exact
-architecture and top-level DLL surface of the build being targeted:
+Point `inspect` at the Windows game executable and `imports` at its runtime DLL.
+Do not commit the game or any proprietary DLL. These reports establish the exact
+architecture and API surface of the build being targeted:
 
 ```sh
 ./build/sadlayer inspect "/path/to/Hollow Knight.exe"
+./build/sadlayer imports "/path/to/UnityPlayer.dll"
 ```
+
+The currently profiled target is documented in
+[docs/HOLLOW_KNIGHT_TARGET.md](docs/HOLLOW_KNIGHT_TARGET.md).
 
 ## Principles
 
