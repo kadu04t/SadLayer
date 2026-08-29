@@ -7,6 +7,7 @@
 #define SL_COFF_HEADER_SIZE 20U
 #define SL_SECTION_HEADER_SIZE 40U
 #define SL_IMPORT_DESCRIPTOR_SIZE 20U
+#define SL_EXPORT_DIRECTORY_SIZE 40U
 
 static bool range_fits(size_t offset, size_t length, size_t total) {
     return offset <= total && length <= total - offset;
@@ -494,6 +495,153 @@ sl_status sl_pe_for_each_import_symbol(
         consumed += SL_IMPORT_DESCRIPTOR_SIZE;
     }
     return SL_ERROR_INVALID_IMAGE;
+}
+
+typedef struct {
+    sl_pe_data_directory range;
+    uint32_t ordinal_base;
+    uint32_t function_count;
+    uint32_t name_count;
+    uint32_t functions_rva;
+    uint32_t names_rva;
+    uint32_t name_ordinals_rva;
+} sl_export_directory;
+
+static bool rva_table_fits(const sl_pe_image *image, uint32_t rva,
+                           uint32_t count, size_t element_size) {
+    size_t offset = 0U;
+    size_t available = 0U;
+    if (count == 0U) {
+        return true;
+    }
+    if ((size_t)count > SIZE_MAX / element_size ||
+        rva_file_window(image, rva, &offset, &available) != SL_OK) {
+        return false;
+    }
+    return (size_t)count * element_size <= available;
+}
+
+static sl_status read_export_directory(const sl_pe_image *image,
+                                       sl_export_directory *exports) {
+    exports->range = image->directories[SL_PE_DIRECTORY_EXPORT];
+    if (exports->range.rva == 0U || exports->range.size == 0U) {
+        return SL_ERROR_EXPORT_NOT_FOUND;
+    }
+    if (exports->range.size < SL_EXPORT_DIRECTORY_SIZE ||
+        exports->range.rva >= image->image_size ||
+        exports->range.size > image->image_size - exports->range.rva ||
+        read_rva_u32(image, exports->range.rva + 16U,
+                     &exports->ordinal_base) != SL_OK ||
+        read_rva_u32(image, exports->range.rva + 20U,
+                     &exports->function_count) != SL_OK ||
+        read_rva_u32(image, exports->range.rva + 24U,
+                     &exports->name_count) != SL_OK ||
+        read_rva_u32(image, exports->range.rva + 28U,
+                     &exports->functions_rva) != SL_OK ||
+        read_rva_u32(image, exports->range.rva + 32U,
+                     &exports->names_rva) != SL_OK ||
+        read_rva_u32(image, exports->range.rva + 36U,
+                     &exports->name_ordinals_rva) != SL_OK) {
+        return SL_ERROR_INVALID_IMAGE;
+    }
+    if (exports->function_count == 0U ||
+        exports->name_count > exports->function_count ||
+        !rva_table_fits(image, exports->functions_rva,
+                        exports->function_count, 4U) ||
+        !rva_table_fits(image, exports->names_rva, exports->name_count, 4U) ||
+        !rva_table_fits(image, exports->name_ordinals_rva,
+                        exports->name_count, 2U)) {
+        return SL_ERROR_INVALID_IMAGE;
+    }
+    return SL_OK;
+}
+
+static sl_status build_export_result(const sl_pe_image *image,
+                                     const sl_export_directory *exports,
+                                     uint32_t function_index, const char *name,
+                                     sl_pe_export *result) {
+    if (function_index >= exports->function_count ||
+        function_index > (UINT32_MAX - exports->functions_rva) / 4U) {
+        return SL_ERROR_INVALID_IMAGE;
+    }
+    uint32_t function_rva = 0U;
+    if (read_rva_u32(image, exports->functions_rva + function_index * 4U,
+                     &function_rva) != SL_OK) {
+        return SL_ERROR_INVALID_IMAGE;
+    }
+    if (function_rva == 0U) {
+        return SL_ERROR_EXPORT_NOT_FOUND;
+    }
+    if (function_rva >= image->image_size ||
+        function_index > UINT32_MAX - exports->ordinal_base) {
+        return SL_ERROR_INVALID_IMAGE;
+    }
+
+    *result = (sl_pe_export){
+        .name = name,
+        .forwarder = NULL,
+        .ordinal = exports->ordinal_base + function_index,
+        .rva = function_rva,
+        .is_forwarder = false,
+    };
+    uint32_t exports_end = exports->range.rva + exports->range.size;
+    if (function_rva >= exports->range.rva && function_rva < exports_end) {
+        if (read_rva_string(image, function_rva, &result->forwarder) != SL_OK) {
+            return SL_ERROR_INVALID_IMAGE;
+        }
+        result->is_forwarder = true;
+    }
+    return SL_OK;
+}
+
+sl_status sl_pe_find_export_by_name(const sl_pe_image *image, const char *name,
+                                    sl_pe_export *result) {
+    if (image == NULL || name == NULL || result == NULL) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    sl_export_directory exports;
+    sl_status status = read_export_directory(image, &exports);
+    if (status != SL_OK) {
+        return status;
+    }
+    for (uint32_t index = 0U; index < exports.name_count; ++index) {
+        uint32_t name_rva = 0U;
+        uint16_t function_index = 0U;
+        const char *candidate = NULL;
+        if (index > (UINT32_MAX - exports.names_rva) / 4U ||
+            index > (UINT32_MAX - exports.name_ordinals_rva) / 2U ||
+            read_rva_u32(image, exports.names_rva + index * 4U, &name_rva) !=
+                SL_OK ||
+            read_rva_u16(image, exports.name_ordinals_rva + index * 2U,
+                         &function_index) != SL_OK ||
+            read_rva_string(image, name_rva, &candidate) != SL_OK) {
+            return SL_ERROR_INVALID_IMAGE;
+        }
+        if (strcmp(candidate, name) == 0) {
+            return build_export_result(image, &exports, function_index,
+                                       candidate, result);
+        }
+    }
+    return SL_ERROR_EXPORT_NOT_FOUND;
+}
+
+sl_status sl_pe_find_export_by_ordinal(const sl_pe_image *image,
+                                       uint32_t ordinal,
+                                       sl_pe_export *result) {
+    if (image == NULL || result == NULL) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    sl_export_directory exports;
+    sl_status status = read_export_directory(image, &exports);
+    if (status != SL_OK) {
+        return status;
+    }
+    if (ordinal < exports.ordinal_base ||
+        ordinal - exports.ordinal_base >= exports.function_count) {
+        return SL_ERROR_EXPORT_NOT_FOUND;
+    }
+    return build_export_result(image, &exports, ordinal - exports.ordinal_base,
+                               NULL, result);
 }
 
 const char *sl_pe_machine_name(uint16_t machine) {

@@ -69,6 +69,8 @@ static void make_pe64_fixture(uint8_t data[FIXTURE_SIZE]) {
     put_u32(data, optional + 60U, 0x200U);
     put_u16(data, optional + 68U, 3U);
     put_u32(data, optional + 108U, 16U);
+    put_u32(data, optional + 112U, 0x10e0U);
+    put_u32(data, optional + 116U, 0x80U);
     put_u32(data, optional + 112U + 8U, 0x1020U);
     put_u32(data, optional + 112U + 12U, 40U);
     put_u32(data, optional + 112U + 40U, 0x10d0U);
@@ -95,6 +97,19 @@ static void make_pe64_fixture(uint8_t data[FIXTURE_SIZE]) {
     put_u32(data, 0x2d4U, 12U);
     put_u16(data, 0x2d8U, 0xa010U);
     put_u16(data, 0x2daU, 0U);
+    put_u32(data, 0x2f0U, 1U);
+    put_u32(data, 0x2f4U, 2U);
+    put_u32(data, 0x2f8U, 1U);
+    put_u32(data, 0x2fcU, 0x1120U);
+    put_u32(data, 0x300U, 0x1128U);
+    put_u32(data, 0x304U, 0x112cU);
+    put_u32(data, 0x320U, 0x1050U);
+    put_u32(data, 0x324U, 0x1150U);
+    put_u32(data, 0x328U, 0x1140U);
+    put_u16(data, 0x32cU, 0U);
+    memcpy(data + 0x330U, "Fixture.dll", 12U);
+    memcpy(data + 0x340U, "UnityMain2", 11U);
+    memcpy(data + 0x350U, "KERNEL32.Sleep", 15U);
     data[0x200U] = 0xabu;
 }
 
@@ -340,6 +355,32 @@ static bool test_relocation_failures_are_atomic(void) {
     return true;
 }
 
+static bool test_export_lookup(void) {
+    uint8_t fixture[FIXTURE_SIZE];
+    sl_pe_image image;
+    sl_pe_export export;
+    make_pe64_fixture(fixture);
+    CHECK(sl_pe_parse((sl_byte_view){fixture, sizeof(fixture)}, &image) ==
+          SL_OK);
+    CHECK(sl_pe_find_export_by_name(&image, "UnityMain2", &export) == SL_OK);
+    CHECK(strcmp(export.name, "UnityMain2") == 0);
+    CHECK(export.ordinal == 1U);
+    CHECK(export.rva == 0x1050U);
+    CHECK(!export.is_forwarder);
+
+    CHECK(sl_pe_find_export_by_ordinal(&image, 2U, &export) == SL_OK);
+    CHECK(export.name == NULL);
+    CHECK(export.ordinal == 2U);
+    CHECK(export.rva == 0x1150U);
+    CHECK(export.is_forwarder);
+    CHECK(strcmp(export.forwarder, "KERNEL32.Sleep") == 0);
+    CHECK(sl_pe_find_export_by_name(&image, "Missing", &export) ==
+          SL_ERROR_EXPORT_NOT_FOUND);
+    CHECK(sl_pe_find_export_by_ordinal(&image, 3U, &export) ==
+          SL_ERROR_EXPORT_NOT_FOUND);
+    return true;
+}
+
 static bool test_rejects_malformed_files(void) {
     uint8_t fixture[FIXTURE_SIZE];
     sl_pe_image image;
@@ -372,6 +413,7 @@ int main(void) {
         {"apply base relocations", test_base_relocations},
         {"reject invalid relocations atomically",
          test_relocation_failures_are_atomic},
+        {"find exports", test_export_lookup},
         {"reject malformed files", test_rejects_malformed_files},
     };
     size_t passed = 0U;

@@ -9,6 +9,7 @@
 
 #define SL_PE_MAX_SECTIONS 96U
 #define SL_PE_DATA_DIRECTORY_COUNT 16U
+#define SL_PE_DIRECTORY_EXPORT 0U
 #define SL_PE_DIRECTORY_IMPORT 1U
 #define SL_PE_DIRECTORY_BASERELOC 5U
 #define SL_PE_MACHINE_I386 0x014cU
@@ -63,6 +64,14 @@ typedef struct {
 typedef bool (*sl_pe_import_symbol_callback)(
     const sl_pe_import_symbol *symbol, void *context);
 
+typedef struct {
+    const char *name;
+    const char *forwarder;
+    uint32_t ordinal;
+    uint32_t rva;
+    bool is_forwarder;
+} sl_pe_export;
+
 sl_status sl_pe_parse(sl_byte_view file, sl_pe_image *image);
 sl_status sl_pe_rva_to_file_offset(const sl_pe_image *image, uint32_t rva,
                                    size_t *offset);
@@ -71,6 +80,11 @@ sl_status sl_pe_for_each_import(const sl_pe_image *image,
 sl_status sl_pe_for_each_import_symbol(
     const sl_pe_image *image, sl_pe_import_symbol_callback callback,
     void *context);
+sl_status sl_pe_find_export_by_name(const sl_pe_image *image, const char *name,
+                                    sl_pe_export *result);
+sl_status sl_pe_find_export_by_ordinal(const sl_pe_image *image,
+                                       uint32_t ordinal,
+                                       sl_pe_export *result);
 const char *sl_pe_machine_name(uint16_t machine);
 const char *sl_pe_subsystem_name(uint16_t subsystem);
 
