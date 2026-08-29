@@ -50,13 +50,27 @@ typedef struct {
 
 typedef bool (*sl_pe_import_callback)(const char *module_name, void *context);
 
+typedef struct {
+    const char *module_name;
+    const char *symbol_name;
+    uint32_t iat_rva;
+    uint16_t hint;
+    uint16_t ordinal;
+    bool by_ordinal;
+} sl_pe_import_symbol;
+
+typedef bool (*sl_pe_import_symbol_callback)(
+    const sl_pe_import_symbol *symbol, void *context);
+
 sl_status sl_pe_parse(sl_byte_view file, sl_pe_image *image);
 sl_status sl_pe_rva_to_file_offset(const sl_pe_image *image, uint32_t rva,
                                    size_t *offset);
 sl_status sl_pe_for_each_import(const sl_pe_image *image,
                                 sl_pe_import_callback callback, void *context);
+sl_status sl_pe_for_each_import_symbol(
+    const sl_pe_image *image, sl_pe_import_symbol_callback callback,
+    void *context);
 const char *sl_pe_machine_name(uint16_t machine);
 const char *sl_pe_subsystem_name(uint16_t subsystem);
 
 #endif
-

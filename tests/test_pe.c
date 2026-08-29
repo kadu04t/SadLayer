@@ -72,6 +72,11 @@ static void make_pe64_fixture(uint8_t data[FIXTURE_SIZE]) {
     put_u32(data, 0x22cU, 0x1080U);
     put_u32(data, 0x230U, 0x1090U);
     memcpy(data + 0x280U, "KERNEL32.dll", 13U);
+    put_u64(data, 0x290U, UINT64_C(0x10b0));
+    put_u64(data, 0x298U, UINT64_C(0x8000000000000042));
+    put_u64(data, 0x2a0U, 0U);
+    put_u16(data, 0x2b0U, 7U);
+    memcpy(data + 0x2b2U, "ExitProcess", 12U);
     data[0x200U] = 0xabu;
 }
 
@@ -99,6 +104,8 @@ static void make_pe32_fixture(uint8_t data[FIXTURE_SIZE]) {
     put_u32(data, optional + 60U, 0x200U);
     put_u16(data, optional + 68U, 2U);
     put_u32(data, optional + 92U, 16U);
+    put_u32(data, optional + 96U + 8U, 0x1020U);
+    put_u32(data, optional + 96U + 12U, 40U);
 
     memcpy(data + section, ".text", 5U);
     put_u32(data, section + 8U, 0x100U);
@@ -106,6 +113,16 @@ static void make_pe32_fixture(uint8_t data[FIXTURE_SIZE]) {
     put_u32(data, section + 16U, 0x200U);
     put_u32(data, section + 20U, 0x200U);
     put_u32(data, section + 36U, 0x60000020U);
+
+    put_u32(data, 0x220U, 0x1090U);
+    put_u32(data, 0x22cU, 0x1080U);
+    put_u32(data, 0x230U, 0x1090U);
+    memcpy(data + 0x280U, "KERNEL32.dll", 13U);
+    put_u32(data, 0x290U, 0x10b0U);
+    put_u32(data, 0x294U, 0x80000042U);
+    put_u32(data, 0x298U, 0U);
+    put_u16(data, 0x2b0U, 7U);
+    memcpy(data + 0x2b2U, "ExitProcess", 12U);
 }
 
 static bool test_parse_pe64(void) {
@@ -184,6 +201,61 @@ static bool test_import_enumeration(void) {
     return true;
 }
 
+typedef struct {
+    size_t count;
+    sl_pe_import_symbol symbols[2];
+    char named_symbol[32];
+} symbol_capture;
+
+static bool capture_symbol(const sl_pe_import_symbol *symbol, void *context) {
+    symbol_capture *capture = context;
+    if (capture->count >= 2U) {
+        return false;
+    }
+    capture->symbols[capture->count] = *symbol;
+    if (symbol->symbol_name != NULL) {
+        (void)snprintf(capture->named_symbol, sizeof(capture->named_symbol),
+                       "%s", symbol->symbol_name);
+        capture->symbols[capture->count].symbol_name = capture->named_symbol;
+    }
+    ++capture->count;
+    return true;
+}
+
+static bool test_import_symbol_enumeration(void) {
+    uint8_t fixture[FIXTURE_SIZE];
+    sl_pe_image image;
+    symbol_capture capture = {0U, {{0}}, {0}};
+    make_pe64_fixture(fixture);
+    CHECK(sl_pe_parse((sl_byte_view){fixture, sizeof(fixture)}, &image) ==
+          SL_OK);
+    CHECK(sl_pe_for_each_import_symbol(&image, capture_symbol, &capture) ==
+          SL_OK);
+    CHECK(capture.count == 2U);
+    CHECK(strcmp(capture.symbols[0].module_name, "KERNEL32.dll") == 0);
+    CHECK(strcmp(capture.symbols[0].symbol_name, "ExitProcess") == 0);
+    CHECK(capture.symbols[0].hint == 7U);
+    CHECK(capture.symbols[0].iat_rva == 0x1090U);
+    CHECK(!capture.symbols[0].by_ordinal);
+    CHECK(capture.symbols[1].by_ordinal);
+    CHECK(capture.symbols[1].ordinal == 0x42U);
+    CHECK(capture.symbols[1].iat_rva == 0x1098U);
+
+    capture = (symbol_capture){0U, {{0}}, {0}};
+    make_pe32_fixture(fixture);
+    CHECK(sl_pe_parse((sl_byte_view){fixture, sizeof(fixture)}, &image) ==
+          SL_OK);
+    CHECK(sl_pe_for_each_import_symbol(&image, capture_symbol, &capture) ==
+          SL_OK);
+    CHECK(capture.count == 2U);
+    CHECK(strcmp(capture.symbols[0].symbol_name, "ExitProcess") == 0);
+    CHECK(capture.symbols[0].iat_rva == 0x1090U);
+    CHECK(capture.symbols[1].by_ordinal);
+    CHECK(capture.symbols[1].ordinal == 0x42U);
+    CHECK(capture.symbols[1].iat_rva == 0x1094U);
+    return true;
+}
+
 static bool test_rejects_malformed_files(void) {
     uint8_t fixture[FIXTURE_SIZE];
     sl_pe_image image;
@@ -212,6 +284,7 @@ int main(void) {
         {"parse PE32", test_parse_pe32},
         {"translate RVA and map image", test_rva_translation_and_mapping},
         {"enumerate imports", test_import_enumeration},
+        {"enumerate import symbols", test_import_symbol_enumeration},
         {"reject malformed files", test_rejects_malformed_files},
     };
     size_t passed = 0U;

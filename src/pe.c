@@ -273,6 +273,34 @@ static sl_status read_rva_u32(const sl_pe_image *image, uint32_t rva,
     return read_u32(image->file, offset, value) ? SL_OK : SL_ERROR_TRUNCATED_FILE;
 }
 
+static sl_status read_rva_u16(const sl_pe_image *image, uint32_t rva,
+                              uint16_t *value) {
+    size_t offset = 0U;
+    size_t available = 0U;
+    sl_status status = rva_file_window(image, rva, &offset, &available);
+    if (status != SL_OK) {
+        return status;
+    }
+    if (available < 2U) {
+        return SL_ERROR_TRUNCATED_FILE;
+    }
+    return read_u16(image->file, offset, value) ? SL_OK : SL_ERROR_TRUNCATED_FILE;
+}
+
+static sl_status read_rva_u64(const sl_pe_image *image, uint32_t rva,
+                              uint64_t *value) {
+    size_t offset = 0U;
+    size_t available = 0U;
+    sl_status status = rva_file_window(image, rva, &offset, &available);
+    if (status != SL_OK) {
+        return status;
+    }
+    if (available < 8U) {
+        return SL_ERROR_TRUNCATED_FILE;
+    }
+    return read_u64(image->file, offset, value) ? SL_OK : SL_ERROR_TRUNCATED_FILE;
+}
+
 static sl_status read_rva_string(const sl_pe_image *image, uint32_t rva,
                                  const char **string) {
     size_t offset = 0U;
@@ -329,6 +357,138 @@ sl_status sl_pe_for_each_import(const sl_pe_image *image,
             return SL_ERROR_INVALID_IMAGE;
         }
         if (!callback(module_name, context)) {
+            return SL_OK;
+        }
+        consumed += SL_IMPORT_DESCRIPTOR_SIZE;
+    }
+    return SL_ERROR_INVALID_IMAGE;
+}
+
+static sl_status visit_import_thunks(const sl_pe_image *image,
+                                     const char *module_name,
+                                     uint32_t original_thunk,
+                                     uint32_t first_thunk,
+                                     sl_pe_import_symbol_callback callback,
+                                     void *context, bool *keep_visiting) {
+    uint32_t lookup_rva = original_thunk != 0U ? original_thunk : first_thunk;
+    uint32_t iat_rva = first_thunk;
+    uint32_t entry_size = image->is_pe32_plus ? 8U : 4U;
+    uint64_t ordinal_flag = image->is_pe32_plus
+                                ? UINT64_C(0x8000000000000000)
+                                : UINT64_C(0x80000000);
+
+    if (lookup_rva == 0U || iat_rva == 0U) {
+        return SL_ERROR_INVALID_IMAGE;
+    }
+    for (;;) {
+        size_t iat_offset = 0U;
+        size_t iat_available = 0U;
+        if (rva_file_window(image, iat_rva, &iat_offset, &iat_available) !=
+                SL_OK ||
+            iat_available < entry_size) {
+            return SL_ERROR_INVALID_IMAGE;
+        }
+        uint64_t thunk = 0U;
+        sl_status status = SL_OK;
+        if (image->is_pe32_plus) {
+            status = read_rva_u64(image, lookup_rva, &thunk);
+        } else {
+            uint32_t thunk32 = 0U;
+            status = read_rva_u32(image, lookup_rva, &thunk32);
+            thunk = thunk32;
+        }
+        if (status != SL_OK) {
+            return SL_ERROR_INVALID_IMAGE;
+        }
+        if (thunk == 0U) {
+            return SL_OK;
+        }
+
+        sl_pe_import_symbol symbol = {
+            .module_name = module_name,
+            .symbol_name = NULL,
+            .iat_rva = iat_rva,
+            .hint = 0U,
+            .ordinal = 0U,
+            .by_ordinal = (thunk & ordinal_flag) != 0U,
+        };
+        if (symbol.by_ordinal) {
+            if ((thunk & ~(ordinal_flag | UINT16_MAX)) != 0U) {
+                return SL_ERROR_INVALID_IMAGE;
+            }
+            symbol.ordinal = (uint16_t)(thunk & UINT16_MAX);
+        } else {
+            if (thunk > UINT32_MAX) {
+                return SL_ERROR_INVALID_IMAGE;
+            }
+            uint32_t name_rva = (uint32_t)thunk;
+            if (name_rva > UINT32_MAX - 2U ||
+                read_rva_u16(image, name_rva, &symbol.hint) != SL_OK ||
+                read_rva_string(image, name_rva + 2U, &symbol.symbol_name) !=
+                    SL_OK) {
+                return SL_ERROR_INVALID_IMAGE;
+            }
+        }
+        if (!callback(&symbol, context)) {
+            *keep_visiting = false;
+            return SL_OK;
+        }
+        if (lookup_rva > UINT32_MAX - entry_size ||
+            iat_rva > UINT32_MAX - entry_size) {
+            return SL_ERROR_INVALID_IMAGE;
+        }
+        lookup_rva += entry_size;
+        iat_rva += entry_size;
+    }
+}
+
+sl_status sl_pe_for_each_import_symbol(
+    const sl_pe_image *image, sl_pe_import_symbol_callback callback,
+    void *context) {
+    if (image == NULL || callback == NULL) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    sl_pe_data_directory imports = image->directories[SL_PE_DIRECTORY_IMPORT];
+    if (imports.rva == 0U || imports.size == 0U) {
+        return SL_OK;
+    }
+    if (imports.rva >= image->image_size ||
+        imports.size > image->image_size - imports.rva) {
+        return SL_ERROR_INVALID_IMAGE;
+    }
+
+    uint32_t consumed = 0U;
+    while (consumed + SL_IMPORT_DESCRIPTOR_SIZE <= imports.size) {
+        uint32_t cursor = imports.rva + consumed;
+        uint32_t original_thunk = 0U;
+        uint32_t timestamp = 0U;
+        uint32_t forwarder_chain = 0U;
+        uint32_t name_rva = 0U;
+        uint32_t first_thunk = 0U;
+        if (cursor < imports.rva ||
+            read_rva_u32(image, cursor, &original_thunk) != SL_OK ||
+            read_rva_u32(image, cursor + 4U, &timestamp) != SL_OK ||
+            read_rva_u32(image, cursor + 8U, &forwarder_chain) != SL_OK ||
+            read_rva_u32(image, cursor + 12U, &name_rva) != SL_OK ||
+            read_rva_u32(image, cursor + 16U, &first_thunk) != SL_OK) {
+            return SL_ERROR_INVALID_IMAGE;
+        }
+        if (original_thunk == 0U && timestamp == 0U && forwarder_chain == 0U &&
+            name_rva == 0U && first_thunk == 0U) {
+            return SL_OK;
+        }
+        const char *module_name = NULL;
+        if (read_rva_string(image, name_rva, &module_name) != SL_OK) {
+            return SL_ERROR_INVALID_IMAGE;
+        }
+        bool keep_visiting = true;
+        sl_status status =
+            visit_import_thunks(image, module_name, original_thunk, first_thunk,
+                                callback, context, &keep_visiting);
+        if (status != SL_OK) {
+            return status;
+        }
+        if (!keep_visiting) {
             return SL_OK;
         }
         consumed += SL_IMPORT_DESCRIPTOR_SIZE;
