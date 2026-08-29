@@ -507,6 +507,35 @@ static bool test_atomic_iat_binding(void) {
     return true;
 }
 
+static bool test_registry_backed_iat_binding(void) {
+    uint8_t fixture[FIXTURE_SIZE];
+    sl_pe_image image;
+    sl_mapped_image mapped = {0};
+    sl_module_registry registry;
+    size_t bound_count = 0U;
+
+    make_pe64_fixture(fixture);
+    memset(fixture + 0x2b2U, 0, 12U);
+    memcpy(fixture + 0x2b2U, "Sleep", 6U);
+    put_u64(fixture, 0x298U, UINT64_C(0x8000000000000002));
+    memset(fixture + 0x340U, 0, 11U);
+    memcpy(fixture + 0x340U, "Sleep", 6U);
+    CHECK(sl_pe_parse((sl_byte_view){fixture, sizeof(fixture)}, &image) ==
+          SL_OK);
+    CHECK(sl_loader_map_image(&image, &mapped) == SL_OK);
+    sl_module_registry_init(&registry);
+    CHECK(sl_module_registry_add(&registry, "KERNEL32.dll", &image, &mapped) ==
+          SL_OK);
+    CHECK(sl_loader_bind_imports(&image, &mapped,
+                                 sl_module_registry_import_resolver, &registry,
+                                 &bound_count) == SL_OK);
+    CHECK(bound_count == 2U);
+    CHECK(get_u64(mapped.bytes, 0x1090U) == mapped.load_base + 0x1050U);
+    CHECK(get_u64(mapped.bytes, 0x1098U) == mapped.load_base + 0x1050U);
+    sl_loader_unmap_image(&mapped);
+    return true;
+}
+
 static bool test_rejects_malformed_files(void) {
     uint8_t fixture[FIXTURE_SIZE];
     sl_pe_image image;
@@ -542,6 +571,7 @@ int main(void) {
         {"find exports", test_export_lookup},
         {"resolve modules and forwarders", test_module_registry_resolution},
         {"bind IAT atomically", test_atomic_iat_binding},
+        {"bind IAT from module registry", test_registry_backed_iat_binding},
         {"reject malformed files", test_rejects_malformed_files},
     };
     size_t passed = 0U;
