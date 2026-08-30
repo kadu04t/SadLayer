@@ -46,6 +46,14 @@ const char *sl_status_string(sl_status status) {
         return "image cannot be loaded away from its preferred base";
     case SL_ERROR_UNSUPPORTED_RELOCATION:
         return "unsupported PE base relocation";
+    case SL_ERROR_MEMORY_MAPPING:
+        return "host virtual-memory mapping failed";
+    case SL_ERROR_MEMORY_PROTECTION:
+        return "host virtual-memory protection failed";
+    case SL_ERROR_WX_CONFLICT:
+        return "PE page would be writable and executable";
+    case SL_ERROR_INVALID_STATE:
+        return "operation is invalid in the current runtime state";
     case SL_ERROR_NOT_IMPLEMENTED:
         return "not implemented yet";
     default:

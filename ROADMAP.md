@@ -37,15 +37,24 @@ Implement, in order:
 - [x] Native module registration and mixed PE/native export forwarding.
 - [x] Atomic IAT binding for PE32 and PE32+.
 - [x] Initial x86-64 `ms_abi` thunk declarations and direct ABI smoke tests.
-- [ ] Address-stable executable mappings, final PE section protections, and a
-  guarded `ms_abi` handoff to a synthetic guest entry point.
+- [x] Address-stable executable mappings with relocation fallback and final
+  page-granular PE protections under a W^X policy.
+- [x] Controlled `ms_abi` handoff for a trusted synthetic PE that calls two
+  built-in KERNEL32 exports through its real IAT and returns to the host.
+- [ ] Isolated subprocess worker on a guarded guest stack with GS/TEB
+  installation and restoration around the synthetic handoff.
+- [ ] Alternate signal stack and fixed-format crash reporting that survives a
+  destroyed guest stack and leaves the parent runtime usable.
 - [ ] Recursive DLL discovery, delay imports, and API Set contracts.
 - [ ] PE TLS directory, callbacks, and per-module thread data.
 - [ ] Structured tracing for module load, symbol resolution, calls, and last
   error.
 
 Exit gate: a synthetic Windows fixture calls a built-in `kernel32` function from
-its real entry point and exits with the expected code.
+its real entry point and returns the expected code to the host.
+
+The direct-call portion of this gate is satisfied. It is not yet the guarded
+worker required before accepting arbitrary PE input.
 
 ## Stage 2 — NT and kernel32 foundation
 
@@ -60,8 +69,10 @@ Implement the minimum coherent process model rather than isolated stubs:
 - [x] Validated explicit-length UTF-8/UTF-16 conversion primitives.
 - [x] Nestable native thread context for last-error/thread identity and the
   future process object.
-- [ ] Guest PEB/TEB state, PE TLS directory/callbacks, validated guest pointers,
-  and coherent handles/object lifetimes.
+- [x] Minimal measured PEB, process-parameters, and guarded TEB memory layouts;
+  KERNEL32 last-error aliases the TEB cell when attached.
+- [ ] GS-backed TEB installation, guest stack, PE TLS directory/callbacks,
+  validated guest pointers, and coherent handles/object lifetimes.
 - [ ] Fiber contexts and process-wide FLS callback enumeration.
 - [ ] Current directory, Windows path normalization, virtual memory, files,
   directories, mappings, waits, synchronization objects, and threads.
@@ -74,16 +85,17 @@ TLS, timing, environment, and loader tests under SadLayer.
 
 ### Immediate blockers before a controlled Hollow Knight handoff
 
-1. Map PE images at their real process addresses with executable/read/write
-   protections instead of treating `load_base` as metadata over `calloc`.
-2. Install a GS-backed synthetic TEB/PEB, stack bounds, process parameters, and
-   validated guest-pointer access before transferring control to guest code.
-3. Run a synthetic PE entry-point fixture under guarded signal/crash tracing.
-4. Complete the launcher's remaining KERNEL32 imports through coherent module,
+1. [x] Map PE images at their real process addresses with final page protections
+   instead of treating `load_base` as metadata over `calloc`.
+2. [ ] Install the prepared TEB/PEB through GS, switch to a guarded guest stack,
+   and expose stack bounds and process parameters before guest code.
+3. [ ] Move the passing synthetic PE entry-point fixture under guarded
+   signal/crash tracing in an isolated worker.
+4. [ ] Complete the launcher's remaining KERNEL32 imports through coherent module,
    handle/filesystem, and x64 exception/unwind subsystems.
-5. Recursively load, relocate, and bind UnityPlayer and its dependency graph; the
+5. [ ] Recursively load, relocate, and bind UnityPlayer and its dependency graph; the
    current link check only examines the executable.
-6. Resolve API Set contracts and implement DLL initialization order, `DllMain`,
+6. [ ] Resolve API Set contracts and implement DLL initialization order, `DllMain`,
    PE TLS data, and TLS callbacks.
 
 ## Stage 3 — Unity/Mono startup surface

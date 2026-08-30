@@ -6,11 +6,14 @@ LDFLAGS ?=
 THREAD_FLAGS ?= -pthread
 
 LIB_SOURCES := src/error.c src/pe.c src/loader.c src/module.c src/unicode.c \
-	src/process.c src/context.c src/win32.c src/kernel32.c
+	src/process.c src/context.c src/teb.c src/win32.c src/kernel32.c \
+	src/runtime.c
 CLI_SOURCES := src/main.c
 TEST_PE_SOURCES := tests/test_pe.c
 TEST_KERNEL32_SOURCES := tests/test_kernel32.c
 TEST_UNICODE_SOURCES := tests/test_unicode.c
+TEST_RUNTIME_SOURCES := tests/test_runtime.c
+TEST_TEB_SOURCES := tests/test_teb.c
 LIB_OBJECTS := $(LIB_SOURCES:%.c=$(BUILD_DIR)/%.o)
 KERNEL32_OBJECT := $(BUILD_DIR)/src/kernel32.o
 TEST_KERNEL32_LIB_OBJECT := $(BUILD_DIR)/src/kernel32-test.o
@@ -20,8 +23,10 @@ CLI_OBJECTS := $(CLI_SOURCES:%.c=$(BUILD_DIR)/%.o)
 TEST_PE_OBJECTS := $(TEST_PE_SOURCES:%.c=$(BUILD_DIR)/%.o)
 TEST_KERNEL32_OBJECTS := $(TEST_KERNEL32_SOURCES:%.c=$(BUILD_DIR)/%.o)
 TEST_UNICODE_OBJECTS := $(TEST_UNICODE_SOURCES:%.c=$(BUILD_DIR)/%.o)
+TEST_RUNTIME_OBJECTS := $(TEST_RUNTIME_SOURCES:%.c=$(BUILD_DIR)/%.o)
+TEST_TEB_OBJECTS := $(TEST_TEB_SOURCES:%.c=$(BUILD_DIR)/%.o)
 TEST_OBJECTS := $(TEST_PE_OBJECTS) $(TEST_KERNEL32_OBJECTS) \
-	$(TEST_UNICODE_OBJECTS)
+	$(TEST_UNICODE_OBJECTS) $(TEST_RUNTIME_OBJECTS) $(TEST_TEB_OBJECTS)
 DEPFILES := $(LIB_OBJECTS:.o=.d) $(TEST_KERNEL32_LIB_OBJECT:.o=.d) \
 	$(CLI_OBJECTS:.o=.d) $(TEST_OBJECTS:.o=.d)
 
@@ -41,6 +46,12 @@ $(BUILD_DIR)/test_kernel32: $(TEST_LIB_OBJECTS) $(TEST_KERNEL32_OBJECTS)
 $(BUILD_DIR)/test_unicode: $(TEST_LIB_OBJECTS) $(TEST_UNICODE_OBJECTS)
 	$(CC) $(LDFLAGS) $(THREAD_FLAGS) $^ -o $@
 
+$(BUILD_DIR)/test_runtime: $(TEST_LIB_OBJECTS) $(TEST_RUNTIME_OBJECTS)
+	$(CC) $(LDFLAGS) $(THREAD_FLAGS) $^ -o $@
+
+$(BUILD_DIR)/test_teb: $(TEST_LIB_OBJECTS) $(TEST_TEB_OBJECTS)
+	$(CC) $(LDFLAGS) $(THREAD_FLAGS) $^ -o $@
+
 $(TEST_KERNEL32_LIB_OBJECT) $(TEST_KERNEL32_OBJECTS): CPPFLAGS += \
 	-DSADLAYER_TESTING
 
@@ -52,10 +63,13 @@ $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(THREAD_FLAGS) -MMD -MP -c $< -o $@
 
-test: $(BUILD_DIR)/test_pe $(BUILD_DIR)/test_kernel32 $(BUILD_DIR)/test_unicode
+test: $(BUILD_DIR)/test_pe $(BUILD_DIR)/test_kernel32 $(BUILD_DIR)/test_unicode \
+	$(BUILD_DIR)/test_runtime $(BUILD_DIR)/test_teb
 	./$(BUILD_DIR)/test_pe
 	./$(BUILD_DIR)/test_kernel32
 	./$(BUILD_DIR)/test_unicode
+	./$(BUILD_DIR)/test_runtime
+	./$(BUILD_DIR)/test_teb
 
 check: all test
 

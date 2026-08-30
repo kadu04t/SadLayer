@@ -32,6 +32,11 @@ The launcher's CRT path reads `GS:[0x30]` and `GS:[0x60]` before reaching
 GS-backed synthetic TEB/PEB is therefore a measured entry-point requirement,
 not merely a later compatibility enhancement.
 
+The execution mapper now reserves this launcher at `0x140000000` on the profiled
+host, applies its final page protections, and identifies the entry address as
+`0x140001264`. SadLayer still does not transfer control to it: the remaining
+imports, guarded guest stack, and GS installation are explicit gates.
+
 ## Direct UnityPlayer modules
 
 - Process/runtime: `KERNEL32`, `ADVAPI32`, `VERSION`, `SHLWAPI`, `SETUPAPI`.

@@ -1,12 +1,20 @@
+#define _GNU_SOURCE
+
 #include "sadlayer/loader.h"
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #define SL_BASE_RELOCATION_HEADER_SIZE 8U
 #define SL_RELOCATION_ABSOLUTE 0U
 #define SL_RELOCATION_HIGHLOW 3U
 #define SL_RELOCATION_DIR64 10U
+#define SL_WINDOWS_ALLOCATION_GRANULARITY (64U * 1024U)
+#define SL_SECTION_MEM_EXECUTE UINT32_C(0x20000000)
+#define SL_SECTION_MEM_READ UINT32_C(0x40000000)
+#define SL_SECTION_MEM_WRITE UINT32_C(0x80000000)
 
 static uint16_t load_u16(const uint8_t *data) {
     return (uint16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8U));
@@ -166,24 +174,19 @@ static sl_status process_relocations(const sl_pe_image *image,
     return SL_OK;
 }
 
-sl_status sl_loader_map_image(const sl_pe_image *image, sl_mapped_image *mapped) {
-    if (image == NULL || mapped == NULL) {
+static sl_status validate_mapping(const sl_pe_image *image) {
+    if (image == NULL) {
         return SL_ERROR_INVALID_ARGUMENT;
     }
-    memset(mapped, 0, sizeof(*mapped));
     if (image->image_size == 0U || image->headers_size > image->image_size ||
         image->headers_size > image->file.size) {
         return SL_ERROR_INVALID_IMAGE;
     }
+    return SL_OK;
+}
 
-    mapped->bytes = calloc((size_t)image->image_size, 1U);
-    if (mapped->bytes == NULL) {
-        return SL_ERROR_OUT_OF_MEMORY;
-    }
-    mapped->size = image->image_size;
-    mapped->preferred_base = image->image_base;
-    mapped->load_base = image->image_base;
-    mapped->entry_rva = image->entry_rva;
+static sl_status populate_mapping(const sl_pe_image *image,
+                                  sl_mapped_image *mapped) {
     memcpy(mapped->bytes, image->file.data, image->headers_size);
 
     for (uint16_t index = 0U; index < image->section_count; ++index) {
@@ -197,7 +200,6 @@ sl_status sl_loader_map_image(const sl_pe_image *image, sl_mapped_image *mapped)
             (size_t)section->raw_offset > image->file.size ||
             (size_t)section->raw_size >
                 image->file.size - (size_t)section->raw_offset) {
-            sl_loader_unmap_image(mapped);
             return SL_ERROR_INVALID_IMAGE;
         }
         memcpy(mapped->bytes + section->virtual_address,
@@ -206,12 +208,192 @@ sl_status sl_loader_map_image(const sl_pe_image *image, sl_mapped_image *mapped)
     return SL_OK;
 }
 
+static void initialize_mapping(const sl_pe_image *image,
+                               sl_mapped_image *mapped, uint8_t *bytes,
+                               size_t allocation_size,
+                               sl_image_storage storage) {
+    mapped->bytes = bytes;
+    mapped->size = image->image_size;
+    mapped->allocation_size = allocation_size;
+    mapped->preferred_base = image->image_base;
+    mapped->load_base = image->image_base;
+    mapped->entry_rva = image->entry_rva;
+    mapped->storage = storage;
+    mapped->protections_finalized = false;
+}
+
+sl_status sl_loader_map_image(const sl_pe_image *image,
+                              sl_mapped_image *mapped) {
+    if (mapped == NULL) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    memset(mapped, 0, sizeof(*mapped));
+    sl_status status = validate_mapping(image);
+    if (status != SL_OK) {
+        return status;
+    }
+
+    uint8_t *bytes = calloc((size_t)image->image_size, 1U);
+    if (bytes == NULL) {
+        return SL_ERROR_OUT_OF_MEMORY;
+    }
+    initialize_mapping(image, mapped, bytes, image->image_size,
+                       SL_IMAGE_STORAGE_HEAP);
+    status = populate_mapping(image, mapped);
+    if (status != SL_OK) {
+        sl_loader_unmap_image(mapped);
+    }
+    return status;
+}
+
+static sl_status host_page_size(size_t *page_size) {
+    long value = sysconf(_SC_PAGESIZE);
+    if (value <= 0L || (unsigned long)value > SIZE_MAX) {
+        return SL_ERROR_MEMORY_MAPPING;
+    }
+    size_t converted = (size_t)value;
+    if ((converted & (converted - 1U)) != 0U) {
+        return SL_ERROR_MEMORY_MAPPING;
+    }
+    *page_size = converted;
+    return SL_OK;
+}
+
+static bool round_up_size(size_t value, size_t alignment, size_t *result) {
+    size_t remainder = value & (alignment - 1U);
+    if (remainder == 0U) {
+        *result = value;
+        return true;
+    }
+    size_t addition = alignment - remainder;
+    if (value > SIZE_MAX - addition) {
+        return false;
+    }
+    *result = value + addition;
+    return true;
+}
+
+static void *map_preferred_address(uint64_t preferred_base,
+                                   size_t allocation_size,
+                                   size_t address_alignment) {
+    if (preferred_base == 0U || preferred_base > UINTPTR_MAX ||
+        preferred_base % address_alignment != 0U ||
+        allocation_size > UINTPTR_MAX - (uintptr_t)preferred_base) {
+        return MAP_FAILED;
+    }
+    void *requested = (void *)(uintptr_t)preferred_base;
+    void *address = mmap(requested, allocation_size, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1,
+                         0);
+    if (address != MAP_FAILED && address != requested) {
+        (void)munmap(address, allocation_size);
+        return MAP_FAILED;
+    }
+    return address;
+}
+
+static void *map_aligned_address(size_t allocation_size, size_t page_size,
+                                 size_t address_alignment) {
+    size_t padding = address_alignment - page_size;
+    if (allocation_size > SIZE_MAX - padding) {
+        return MAP_FAILED;
+    }
+    size_t reservation_size = allocation_size + padding;
+    uint8_t *reservation =
+        mmap(NULL, reservation_size, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (reservation == MAP_FAILED) {
+        return MAP_FAILED;
+    }
+
+    uintptr_t reservation_address = (uintptr_t)reservation;
+    if (reservation_address > UINTPTR_MAX - (address_alignment - 1U)) {
+        (void)munmap(reservation, reservation_size);
+        return MAP_FAILED;
+    }
+    uintptr_t aligned_address =
+        (reservation_address + address_alignment - 1U) &
+        ~(uintptr_t)(address_alignment - 1U);
+    size_t prefix_size = (size_t)(aligned_address - reservation_address);
+    size_t suffix_size = reservation_size - prefix_size - allocation_size;
+
+    if (prefix_size != 0U && munmap(reservation, prefix_size) != 0) {
+        (void)munmap(reservation, reservation_size);
+        return MAP_FAILED;
+    }
+    uint8_t *aligned = (uint8_t *)aligned_address;
+    if (suffix_size != 0U &&
+        munmap(aligned + allocation_size, suffix_size) != 0) {
+        (void)munmap(aligned, reservation_size - prefix_size);
+        return MAP_FAILED;
+    }
+    return aligned;
+}
+
+sl_status sl_loader_map_image_for_execution(const sl_pe_image *image,
+                                            sl_mapped_image *mapped) {
+    if (mapped == NULL) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    memset(mapped, 0, sizeof(*mapped));
+    sl_status status = validate_mapping(image);
+    if (status != SL_OK) {
+        return status;
+    }
+    if (!image->is_pe32_plus || image->machine != SL_PE_MACHINE_AMD64) {
+        return SL_ERROR_UNSUPPORTED_MACHINE;
+    }
+
+    size_t page_size = 0U;
+    status = host_page_size(&page_size);
+    size_t allocation_size = 0U;
+    if (status != SL_OK ||
+        !round_up_size((size_t)image->image_size, page_size,
+                       &allocation_size)) {
+        return status != SL_OK ? status : SL_ERROR_MEMORY_MAPPING;
+    }
+    size_t address_alignment = SL_WINDOWS_ALLOCATION_GRANULARITY;
+    if (page_size > address_alignment) {
+        address_alignment = page_size;
+    }
+
+    void *address = map_preferred_address(image->image_base, allocation_size,
+                                          address_alignment);
+    if (address == MAP_FAILED) {
+        address = map_aligned_address(allocation_size, page_size,
+                                      address_alignment);
+    }
+    if (address == MAP_FAILED) {
+        return SL_ERROR_MEMORY_MAPPING;
+    }
+
+    initialize_mapping(image, mapped, address, allocation_size,
+                       SL_IMAGE_STORAGE_VIRTUAL);
+    status = populate_mapping(image, mapped);
+    if (status == SL_OK) {
+        status = sl_loader_apply_relocations(
+            image, mapped, (uint64_t)(uintptr_t)mapped->bytes);
+    }
+    if (status != SL_OK) {
+        sl_loader_unmap_image(mapped);
+    }
+    return status;
+}
+
 sl_status sl_loader_apply_relocations(const sl_pe_image *image,
                                       sl_mapped_image *mapped,
                                       uint64_t load_base) {
     if (image == NULL || mapped == NULL || mapped->bytes == NULL ||
         mapped->size != image->image_size) {
         return SL_ERROR_INVALID_ARGUMENT;
+    }
+    if (mapped->protections_finalized ||
+        mapped->storage == SL_IMAGE_STORAGE_VIRTUAL_TAINTED) {
+        return SL_ERROR_INVALID_STATE;
+    }
+    if (mapped->storage == SL_IMAGE_STORAGE_VIRTUAL &&
+        load_base != (uint64_t)(uintptr_t)mapped->bytes) {
+        return SL_ERROR_INVALID_STATE;
     }
     if (!image->is_pe32_plus && load_base > UINT32_MAX) {
         return SL_ERROR_INVALID_ARGUMENT;
@@ -254,6 +436,10 @@ sl_status sl_loader_bind_imports(const sl_pe_image *image,
     if (image == NULL || mapped == NULL || mapped->bytes == NULL ||
         mapped->size != image->image_size || resolver == NULL) {
         return SL_ERROR_INVALID_ARGUMENT;
+    }
+    if (mapped->protections_finalized ||
+        mapped->storage == SL_IMAGE_STORAGE_VIRTUAL_TAINTED) {
+        return SL_ERROR_INVALID_STATE;
     }
 
     sl_import_count_context count = {0U, false};
@@ -308,10 +494,130 @@ sl_status sl_loader_bind_imports(const sl_pe_image *image,
     return status;
 }
 
+static sl_status add_page_permissions(uint8_t *permissions, size_t page_count,
+                                      size_t page_size, size_t image_size,
+                                      size_t start, size_t length,
+                                      uint8_t protection) {
+    if (length == 0U) {
+        return SL_OK;
+    }
+    if (start > image_size || length > image_size - start) {
+        return SL_ERROR_INVALID_IMAGE;
+    }
+    size_t end = start + length;
+    size_t first_page = start / page_size;
+    size_t last_page = (end - 1U) / page_size;
+    if (first_page >= page_count || last_page >= page_count) {
+        return SL_ERROR_INVALID_IMAGE;
+    }
+    for (size_t page = first_page; page <= last_page; ++page) {
+        permissions[page] |= protection;
+    }
+    return SL_OK;
+}
+
+sl_status sl_loader_finalize_image(const sl_pe_image *image,
+                                   sl_mapped_image *mapped) {
+    if (mapped != NULL &&
+        mapped->storage == SL_IMAGE_STORAGE_VIRTUAL_TAINTED) {
+        return SL_ERROR_INVALID_STATE;
+    }
+    if (image == NULL || mapped == NULL || mapped->bytes == NULL ||
+        mapped->storage != SL_IMAGE_STORAGE_VIRTUAL ||
+        mapped->size != image->image_size || mapped->allocation_size == 0U) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    if (mapped->protections_finalized) {
+        return SL_OK;
+    }
+
+    size_t page_size = 0U;
+    sl_status status = host_page_size(&page_size);
+    if (status != SL_OK || mapped->allocation_size % page_size != 0U) {
+        return status != SL_OK ? status : SL_ERROR_INVALID_STATE;
+    }
+    size_t page_count = mapped->allocation_size / page_size;
+    uint8_t *permissions = calloc(page_count, sizeof(*permissions));
+    if (permissions == NULL) {
+        return SL_ERROR_OUT_OF_MEMORY;
+    }
+
+    status = add_page_permissions(
+        permissions, page_count, page_size, mapped->size, 0U,
+        image->headers_size, (uint8_t)PROT_READ);
+    for (uint16_t index = 0U; status == SL_OK &&
+                              index < image->section_count;
+         ++index) {
+        const sl_pe_section *section = &image->sections[index];
+        size_t length = section->virtual_size;
+        if ((size_t)section->raw_size > length) {
+            length = section->raw_size;
+        }
+        uint8_t protection = 0U;
+        if ((section->characteristics & SL_SECTION_MEM_READ) != 0U) {
+            protection |= (uint8_t)PROT_READ;
+        }
+        if ((section->characteristics & SL_SECTION_MEM_WRITE) != 0U) {
+            protection |= (uint8_t)PROT_WRITE;
+        }
+        if ((section->characteristics & SL_SECTION_MEM_EXECUTE) != 0U) {
+            protection |= (uint8_t)PROT_EXEC;
+        }
+        status = add_page_permissions(
+            permissions, page_count, page_size, mapped->size,
+            section->virtual_address, length, protection);
+    }
+
+    for (size_t page = 0U; status == SL_OK && page < page_count; ++page) {
+        if ((permissions[page] & (uint8_t)PROT_WRITE) != 0U &&
+            (permissions[page] & (uint8_t)PROT_EXEC) != 0U) {
+            status = SL_ERROR_WX_CONFLICT;
+        }
+    }
+    if (status == SL_OK) {
+        __builtin___clear_cache((char *)mapped->bytes,
+                                (char *)mapped->bytes + mapped->size);
+        size_t first_page = 0U;
+        while (first_page < page_count) {
+            size_t end_page = first_page + 1U;
+            while (end_page < page_count &&
+                   permissions[end_page] == permissions[first_page]) {
+                ++end_page;
+            }
+            if (mprotect(mapped->bytes + first_page * page_size,
+                         (end_page - first_page) * page_size,
+                         (int)permissions[first_page]) != 0) {
+                status = SL_ERROR_MEMORY_PROTECTION;
+                break;
+            }
+            first_page = end_page;
+        }
+    }
+    free(permissions);
+
+    if (status != SL_OK) {
+        if (mprotect(mapped->bytes, mapped->allocation_size,
+                     PROT_READ | PROT_WRITE) != 0) {
+            mapped->storage = SL_IMAGE_STORAGE_VIRTUAL_TAINTED;
+            return SL_ERROR_MEMORY_PROTECTION;
+        }
+        return status;
+    }
+    mapped->protections_finalized = true;
+    return SL_OK;
+}
+
 void sl_loader_unmap_image(sl_mapped_image *mapped) {
     if (mapped == NULL) {
         return;
     }
-    free(mapped->bytes);
+    if (mapped->storage == SL_IMAGE_STORAGE_VIRTUAL ||
+        mapped->storage == SL_IMAGE_STORAGE_VIRTUAL_TAINTED) {
+        if (mapped->bytes != NULL && mapped->allocation_size != 0U) {
+            (void)munmap(mapped->bytes, mapped->allocation_size);
+        }
+    } else {
+        free(mapped->bytes);
+    }
     memset(mapped, 0, sizeof(*mapped));
 }

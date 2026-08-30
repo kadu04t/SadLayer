@@ -306,11 +306,16 @@ static sl_status check_link(const sl_pe_image *program_image,
 
 static sl_status map_image(const sl_pe_image *image) {
     sl_mapped_image mapped = {0};
-    sl_status status = sl_loader_map_image(image, &mapped);
+    sl_status status = sl_loader_map_image_for_execution(image, &mapped);
     if (status == SL_OK) {
-        printf("Mapped %zu bytes; guest entry point is base + 0x%08" PRIx32
+        status = sl_loader_finalize_image(image, &mapped);
+    }
+    if (status == SL_OK) {
+        printf("Mapped %zu bytes at 0x%016" PRIx64
+               " with final protections; guest entry point is 0x%016" PRIx64
                ".\n",
-               mapped.size, mapped.entry_rva);
+               mapped.size, mapped.load_base,
+               mapped.load_base + mapped.entry_rva);
     }
     sl_loader_unmap_image(&mapped);
     return status;
@@ -355,8 +360,8 @@ int main(int argc, char **argv) {
     } else if (status == SL_OK) {
         status = map_image(&image);
         if (status == SL_OK && run) {
-            fputs("sadlayer: execution handoff is the next milestone; image and "
-                  "entry point are valid.\n",
+            fputs("sadlayer: arbitrary guest handoff is disabled; the guarded "
+                  "GS/TEB worker is the next execution gate.\n",
                   stderr);
             status = SL_ERROR_NOT_IMPLEMENTED;
         }

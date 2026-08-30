@@ -262,21 +262,32 @@ static bool test_tls_concurrent_reuse(void) {
 
 static bool test_context_scopes(void) {
     sl_kernel32_set_last_error(11U);
+    sl_win32_process *process = NULL;
+    CHECK(sl_win32_process_create(&process) == SL_OK);
     sl_win32_thread_context first = {
-        .process = NULL,
+        .process = process,
         .last_error = 22U,
         .thread_id = 0U,
     };
     sl_win32_thread_context second = {
-        .process = NULL,
+        .process = process,
         .last_error = 44U,
         .thread_id = 0U,
     };
     sl_win32_context_scope first_scope;
     sl_win32_context_scope second_scope;
+    sl_win32_context_scope never_entered_scope;
 
     CHECK(sl_win32_context_current() == NULL);
+    CHECK(sl_win32_context_leave(&never_entered_scope) ==
+          SL_ERROR_INVALID_ARGUMENT);
     CHECK(sl_win32_context_enter(&first, &first_scope) == SL_OK);
+    CHECK(sl_win32_process_destroy(process) == SL_ERROR_INVALID_STATE);
+    CHECK(sl_win32_context_current() == &first);
+    CHECK(sl_win32_context_leave(&never_entered_scope) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_win32_context_enter(&second, &first_scope) ==
+          SL_ERROR_INVALID_STATE);
     CHECK(sl_win32_context_current() == &first);
     CHECK(sl_kernel32_get_last_error() == 22U);
     sl_kernel32_set_last_error(33U);
@@ -297,6 +308,131 @@ static bool test_context_scopes(void) {
     CHECK(sl_win32_context_current() == NULL);
     CHECK(sl_kernel32_get_last_error() == 11U);
     CHECK(sl_win32_context_leave(&first_scope) == SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_win32_context_enter(&second, &first_scope) == SL_OK);
+    CHECK(sl_win32_context_leave(&first_scope) == SL_OK);
+    CHECK(sl_win32_process_destroy(process) == SL_OK);
+    return true;
+}
+
+typedef struct {
+    sl_win32_thread_context *thread;
+    sl_status enter_status;
+    sl_status leave_status;
+    bool observed_current;
+} context_affinity_probe;
+
+static int enter_context_from_host_thread(void *opaque) {
+    context_affinity_probe *probe = opaque;
+    sl_win32_context_scope scope;
+    probe->enter_status = sl_win32_context_enter(probe->thread, &scope);
+    if (probe->enter_status != SL_OK) {
+        return 0;
+    }
+    probe->observed_current = sl_win32_context_current() == probe->thread;
+    probe->leave_status = sl_win32_context_leave(&scope);
+    return 0;
+}
+
+static bool test_context_host_thread_affinity(void) {
+    sl_win32_process *process = NULL;
+    CHECK(sl_win32_process_create(&process) == SL_OK);
+    sl_win32_thread_context thread = {.process = process};
+    sl_win32_context_scope scope;
+    CHECK(sl_win32_context_enter(&thread, &scope) == SL_OK);
+    CHECK(sl_win32_context_is_active(&thread));
+
+    context_affinity_probe blocked = {
+        .thread = &thread,
+        .enter_status = SL_OK,
+        .leave_status = SL_OK,
+        .observed_current = false,
+    };
+    thrd_t worker;
+    CHECK(thrd_create(&worker, enter_context_from_host_thread, &blocked) ==
+          thrd_success);
+    int worker_result = 1;
+    CHECK(thrd_join(worker, &worker_result) == thrd_success);
+    CHECK(worker_result == 0);
+    CHECK(blocked.enter_status == SL_ERROR_INVALID_STATE);
+    CHECK(!blocked.observed_current);
+
+    CHECK(sl_win32_context_leave(&scope) == SL_OK);
+    CHECK(!sl_win32_context_is_active(&thread));
+    context_affinity_probe transferred = {
+        .thread = &thread,
+        .enter_status = SL_ERROR_INVALID_STATE,
+        .leave_status = SL_ERROR_INVALID_STATE,
+        .observed_current = false,
+    };
+    CHECK(thrd_create(&worker, enter_context_from_host_thread, &transferred) ==
+          thrd_success);
+    worker_result = 1;
+    CHECK(thrd_join(worker, &worker_result) == thrd_success);
+    CHECK(worker_result == 0);
+    CHECK(transferred.enter_status == SL_OK);
+    CHECK(transferred.leave_status == SL_OK);
+    CHECK(transferred.observed_current);
+    CHECK(!sl_win32_context_is_active(&thread));
+    CHECK(sl_win32_process_destroy(process) == SL_OK);
+    return true;
+}
+
+static bool test_context_local_tls_and_fls(void) {
+    uint32_t tls_index = sl_kernel32_tls_alloc();
+    uint32_t fls_index = sl_kernel32_fls_alloc(0U);
+    CHECK(tls_index != SL_WIN32_TLS_OUT_OF_INDEXES);
+    CHECK(fls_index != SL_WIN32_TLS_OUT_OF_INDEXES);
+    CHECK(sl_kernel32_tls_set_value(tls_index,
+                                    (void *)(uintptr_t)0x1111U) ==
+          SL_WIN32_TRUE);
+    CHECK(sl_kernel32_fls_set_value(fls_index,
+                                    (void *)(uintptr_t)0x2222U) ==
+          SL_WIN32_TRUE);
+
+    sl_win32_thread_context first = {0};
+    sl_win32_thread_context second = {0};
+    sl_win32_context_scope first_scope;
+    sl_win32_context_scope second_scope;
+    CHECK(sl_win32_context_enter(&first, &first_scope) == SL_OK);
+    CHECK(sl_kernel32_tls_get_value(tls_index) == NULL);
+    CHECK(sl_kernel32_fls_get_value(fls_index) == NULL);
+    CHECK(sl_kernel32_tls_set_value(tls_index,
+                                    (void *)(uintptr_t)0x3333U) ==
+          SL_WIN32_TRUE);
+    CHECK(sl_kernel32_fls_set_value(fls_index,
+                                    (void *)(uintptr_t)0x4444U) ==
+          SL_WIN32_TRUE);
+
+    CHECK(sl_win32_context_enter(&second, &second_scope) == SL_OK);
+    CHECK(sl_kernel32_tls_get_value(tls_index) == NULL);
+    CHECK(sl_kernel32_fls_get_value(fls_index) == NULL);
+    CHECK(sl_kernel32_tls_set_value(tls_index,
+                                    (void *)(uintptr_t)0x5555U) ==
+          SL_WIN32_TRUE);
+    CHECK(sl_kernel32_fls_set_value(fls_index,
+                                    (void *)(uintptr_t)0x6666U) ==
+          SL_WIN32_TRUE);
+    CHECK(sl_win32_context_leave(&second_scope) == SL_OK);
+
+    CHECK((uintptr_t)sl_kernel32_tls_get_value(tls_index) ==
+          (uintptr_t)0x3333U);
+    CHECK((uintptr_t)sl_kernel32_fls_get_value(fls_index) ==
+          (uintptr_t)0x4444U);
+    CHECK(sl_win32_context_leave(&first_scope) == SL_OK);
+
+    CHECK((uintptr_t)sl_kernel32_tls_get_value(tls_index) ==
+          (uintptr_t)0x1111U);
+    CHECK((uintptr_t)sl_kernel32_fls_get_value(fls_index) ==
+          (uintptr_t)0x2222U);
+    CHECK(sl_win32_context_enter(&second, &second_scope) == SL_OK);
+    CHECK((uintptr_t)sl_kernel32_tls_get_value(tls_index) ==
+          (uintptr_t)0x5555U);
+    CHECK((uintptr_t)sl_kernel32_fls_get_value(fls_index) ==
+          (uintptr_t)0x6666U);
+    CHECK(sl_win32_context_leave(&second_scope) == SL_OK);
+
+    CHECK(sl_kernel32_tls_free(tls_index) == SL_WIN32_TRUE);
+    CHECK(sl_kernel32_fls_free(fls_index) == SL_WIN32_TRUE);
     return true;
 }
 
@@ -360,8 +496,8 @@ static bool test_process_pointer_cookie(void) {
     CHECK(encode(NULL) == encoded_null);
     CHECK(sl_win32_context_leave(&first_scope) == SL_OK);
 
-    sl_win32_process_destroy(second_process);
-    sl_win32_process_destroy(first_process);
+    CHECK(sl_win32_process_destroy(second_process) == SL_OK);
+    CHECK(sl_win32_process_destroy(first_process) == SL_OK);
     return true;
 }
 
@@ -671,6 +807,8 @@ int main(void) {
         {"last-error and TLS", test_last_error_and_tls},
         {"TLS concurrent index reuse", test_tls_concurrent_reuse},
         {"nested thread contexts", test_context_scopes},
+        {"context host-thread affinity", test_context_host_thread_affinity},
+        {"context-local TLS and FLS", test_context_local_tls_and_fls},
         {"process pointer cookie", test_process_pointer_cookie},
         {"FLS lifecycle", test_fls_lifecycle},
         {"heap contract", test_heap_contract},

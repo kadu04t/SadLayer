@@ -32,7 +32,7 @@
 #define SL_HEAP_ZERO_MEMORY 0x00000008U
 #define SL_HEAP_REALLOC_IN_PLACE_ONLY 0x00000010U
 #define SL_HEAP_MAGIC UINT64_C(0x534c484541504d47)
-#define SL_LOCAL_SLOT_COUNT 256U
+#define SL_LOCAL_SLOT_COUNT SL_WIN32_LOCAL_SLOT_COUNT
 #define SL_SLOT_FREE 0U
 #define SL_SLOT_INITIALIZING 1U
 #define SL_SLOT_ALLOCATED 2U
@@ -70,11 +70,6 @@ union sl_environment_header {
         sl_environment_header *next;
     } metadata;
 };
-
-typedef struct {
-    void *value;
-    uint64_t generation;
-} sl_local_value;
 
 typedef struct {
     atomic_uint state;
@@ -124,8 +119,10 @@ _Static_assert(sizeof(sl_cp_info) == 20U, "Windows CPINFO layout changed");
 
 static _Thread_local uint32_t sl_fallback_last_error = SL_ERROR_SUCCESS;
 static _Thread_local uint32_t sl_fallback_thread_id = 0U;
-static _Thread_local sl_local_value sl_tls_values[SL_LOCAL_SLOT_COUNT];
-static _Thread_local sl_local_value sl_fls_values[SL_LOCAL_SLOT_COUNT];
+static _Thread_local sl_win32_local_value
+    sl_fallback_tls_values[SL_LOCAL_SLOT_COUNT];
+static _Thread_local sl_win32_local_value
+    sl_fallback_fls_values[SL_LOCAL_SLOT_COUNT];
 static atomic_uint_least32_t sl_next_thread_id = ATOMIC_VAR_INIT(1U);
 static sl_local_slot sl_tls_slots[SL_LOCAL_SLOT_COUNT];
 static sl_local_slot sl_fls_slots[SL_LOCAL_SLOT_COUNT];
@@ -153,7 +150,21 @@ extern char **environ;
 
 static uint32_t *current_last_error(void) {
     sl_win32_thread_context *thread = sl_win32_context_current();
-    return thread == NULL ? &sl_fallback_last_error : &thread->last_error;
+    if (thread == NULL) {
+        return &sl_fallback_last_error;
+    }
+    return thread->last_error_address == NULL ? &thread->last_error
+                                               : thread->last_error_address;
+}
+
+static sl_win32_local_value *current_tls_values(void) {
+    sl_win32_thread_context *thread = sl_win32_context_current();
+    return thread == NULL ? sl_fallback_tls_values : thread->tls_values;
+}
+
+static sl_win32_local_value *current_fls_values(void) {
+    sl_win32_thread_context *thread = sl_win32_context_current();
+    return thread == NULL ? sl_fallback_fls_values : thread->fls_values;
 }
 
 #define sl_last_error (*current_last_error())
@@ -366,7 +377,8 @@ static uint32_t local_alloc(sl_local_slot slots[SL_LOCAL_SLOT_COUNT],
 }
 
 static sl_win32_bool local_free(sl_local_slot slots[SL_LOCAL_SLOT_COUNT],
-                                sl_local_value values[SL_LOCAL_SLOT_COUNT],
+                                sl_win32_local_value
+                                    values[SL_LOCAL_SLOT_COUNT],
                                 uint32_t index, bool invoke_callback) {
     if (index >= SL_LOCAL_SLOT_COUNT) {
         sl_last_error = SL_ERROR_INVALID_PARAMETER;
@@ -386,7 +398,7 @@ static sl_win32_bool local_free(sl_local_slot slots[SL_LOCAL_SLOT_COUNT],
                       : NULL;
     uintptr_t callback_address = atomic_load_explicit(
         &slots[index].callback_address, memory_order_acquire);
-    values[index] = (sl_local_value){NULL, 0U};
+    values[index] = (sl_win32_local_value){NULL, 0U};
     atomic_store_explicit(&slots[index].callback_address, 0U,
                           memory_order_release);
     if (invoke_callback && callback_address != 0U && value != NULL) {
@@ -419,7 +431,7 @@ static bool local_generation(sl_local_slot *slot, uint64_t *generation) {
 }
 
 static void *local_get(sl_local_slot slots[SL_LOCAL_SLOT_COUNT],
-                       sl_local_value values[SL_LOCAL_SLOT_COUNT],
+                       sl_win32_local_value values[SL_LOCAL_SLOT_COUNT],
                        uint32_t index) {
     if (index >= SL_LOCAL_SLOT_COUNT) {
         sl_last_error = SL_ERROR_INVALID_PARAMETER;
@@ -448,7 +460,8 @@ static void *local_get(sl_local_slot slots[SL_LOCAL_SLOT_COUNT],
 }
 
 static sl_win32_bool local_set(sl_local_slot slots[SL_LOCAL_SLOT_COUNT],
-                               sl_local_value values[SL_LOCAL_SLOT_COUNT],
+                               sl_win32_local_value
+                                   values[SL_LOCAL_SLOT_COUNT],
                                uint32_t index, void *value) {
     if (index >= SL_LOCAL_SLOT_COUNT) {
         sl_last_error = SL_ERROR_INVALID_PARAMETER;
@@ -460,7 +473,7 @@ static sl_win32_bool local_set(sl_local_slot slots[SL_LOCAL_SLOT_COUNT],
         sl_last_error = SL_ERROR_INVALID_PARAMETER;
         return SL_WIN32_FALSE;
     }
-    values[index] = (sl_local_value){
+    values[index] = (sl_win32_local_value){
         .value = value,
         .generation = generation,
     };
@@ -475,7 +488,7 @@ static sl_win32_bool local_set(sl_local_slot slots[SL_LOCAL_SLOT_COUNT],
             memory_order_acquire, memory_order_relaxed) ||
         atomic_load_explicit(&slots[index].generation, memory_order_acquire) !=
             generation) {
-        values[index] = (sl_local_value){NULL, 0U};
+        values[index] = (sl_win32_local_value){NULL, 0U};
         sl_last_error = SL_ERROR_INVALID_PARAMETER;
         return SL_WIN32_FALSE;
     }
@@ -487,15 +500,15 @@ uint32_t SL_WINAPI sl_kernel32_tls_alloc(void) {
 }
 
 sl_win32_bool SL_WINAPI sl_kernel32_tls_free(uint32_t index) {
-    return local_free(sl_tls_slots, sl_tls_values, index, false);
+    return local_free(sl_tls_slots, current_tls_values(), index, false);
 }
 
 void *SL_WINAPI sl_kernel32_tls_get_value(uint32_t index) {
-    return local_get(sl_tls_slots, sl_tls_values, index);
+    return local_get(sl_tls_slots, current_tls_values(), index);
 }
 
 sl_win32_bool SL_WINAPI sl_kernel32_tls_set_value(uint32_t index, void *value) {
-    return local_set(sl_tls_slots, sl_tls_values, index, value);
+    return local_set(sl_tls_slots, current_tls_values(), index, value);
 }
 
 uint32_t SL_WINAPI sl_kernel32_fls_alloc(uintptr_t callback_address) {
@@ -503,15 +516,15 @@ uint32_t SL_WINAPI sl_kernel32_fls_alloc(uintptr_t callback_address) {
 }
 
 sl_win32_bool SL_WINAPI sl_kernel32_fls_free(uint32_t index) {
-    return local_free(sl_fls_slots, sl_fls_values, index, true);
+    return local_free(sl_fls_slots, current_fls_values(), index, true);
 }
 
 void *SL_WINAPI sl_kernel32_fls_get_value(uint32_t index) {
-    return local_get(sl_fls_slots, sl_fls_values, index);
+    return local_get(sl_fls_slots, current_fls_values(), index);
 }
 
 sl_win32_bool SL_WINAPI sl_kernel32_fls_set_value(uint32_t index, void *value) {
-    return local_set(sl_fls_slots, sl_fls_values, index, value);
+    return local_set(sl_fls_slots, current_fls_values(), index, value);
 }
 
 static sl_critical_section *critical_section_from_guest(void *guest) {
