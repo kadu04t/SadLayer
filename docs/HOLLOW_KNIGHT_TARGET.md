@@ -32,10 +32,19 @@ The launcher's CRT path reads `GS:[0x30]` and `GS:[0x60]` before reaching
 GS-backed synthetic TEB/PEB is therefore a measured entry-point requirement,
 not merely a later compatibility enhancement.
 
+The isolated synthetic worker now exercises those exact GS offsets from PE
+code, validates the PEB image base and stack bounds, calls KERNEL32 through its
+bound IAT, and returns while preserving the parent GS state. Crash fixtures hit
+the lower stack guard page and emit signal/code, fault address, RIP, and RSP
+from a guarded alternate signal stack. One deliberately sets RSP to zero first,
+proving that the report survives destruction of the guest stack and that the
+parent remains usable.
+
 The execution mapper now reserves this launcher at `0x140000000` on the profiled
 host, applies its final page protections, and identifies the entry address as
 `0x140001264`. SadLayer still does not transfer control to it: the remaining
-imports, guarded guest stack, and GS installation are explicit gates.
+launcher imports, recursive UnityPlayer dependency binding, initialization
+order, API Set routing, PE TLS, and exception/unwind support are explicit gates.
 
 ## Direct UnityPlayer modules
 
@@ -48,16 +57,20 @@ imports, guarded guest stack, and GS installation are explicit gates.
 - Synchronization: `api-ms-win-core-synch-l1-2-0`.
 - Shell: `SHELL32`.
 
-API Set names are contracts that the future module resolver must redirect to
-SadLayer implementations; they are not separate platform backends.
+API Set names are contracts, not separate platform backends. The module registry
+now has an explicit one-hop alias primitive that routes imports and forwarders to
+an already registered host module. Populating the real contract mappings and
+integrating Windows API Set schema/policy remain loader gates.
 
 ## Loader implications
 
 The first loader path must support x86-64 base relocations, named and ordinal
 imports, API Set aliases, DLL export lookup, IAT patching, TLS inspection, and
-x64 unwind metadata. The inventory does not prove which graphics path is chosen
-at runtime, so both imported graphics families remain candidates until tracing
-captures the actual initialization path.
+x64 unwind metadata. Generic alias-aware import/IAT/forwarder plumbing now
+exists, but authoritative mappings for the target contracts are still required.
+The inventory does not prove which graphics path is chosen at runtime, so both
+imported graphics families remain candidates until tracing captures the actual
+initialization path.
 
 Reproduce the symbol count with:
 

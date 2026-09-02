@@ -23,7 +23,8 @@ The bootstrap can already:
 - reserve address-stable PE32+ images with non-destructive Linux `mmap`, fall
   back through relocation when the preferred base is occupied, and apply final
   per-page PE protections with a strict W^X check;
-- register mapped PE and native modules and resolve mixed forwarder chains;
+- register mapped PE and native modules, copy explicit module aliases, and
+  resolve imports and mixed forwarder chains through the aliased host module;
 - bind PE32/PE32+ import address tables without partial writes;
 - expose an initial 54-export `KERNEL32.dll` subset through x86-64 `ms_abi`
   thunks for last-error state, time/identity, heap, TLS, no-fiber FLS, critical
@@ -39,8 +40,21 @@ The bootstrap can already:
   sharing `TEB+0x68` with the KERNEL32 last-error thunk;
 - execute a trusted synthetic PE32+ entry point that calls native KERNEL32
   functions through its bound IAT and returns normally to Linux;
+- run the GS-aware synthetic entry point in an isolated copy-on-write process
+  on a 1 MiB stack between guard pages, install and restore the TEB through GS,
+  normalize inherited signal state, observe `ExitProcess`/`TerminateProcess`,
+  and contain fatal guest signals without losing the parent;
+- report handled crashes from a guarded 128 KiB alternate signal stack through
+  a fixed-width record containing signal/code, fault address, RIP, and RSP;
+  the report still arrives when a fixture destroys its guest RSP before hitting
+  the lower stack guard page;
 - classify the first Win32 DLL targets needed by the runtime;
 - reject malformed and unsupported images with explicit errors.
+
+Module aliases are explicit, bounded, case-insensitive, and one-hop: each alias
+must target an already registered module. This is shared plumbing for imports,
+IAT binding, and forwarders, not complete API Set support. SadLayer does not yet
+read an API Set schema or populate the target build's contract-to-host mappings.
 
 The native KERNEL32 surface is a host-backed bootstrap subset, not a complete
 Windows process environment. Its thunks are exercised directly by unit tests;
@@ -53,9 +67,10 @@ host-thread fallback only when no guest context is installed. Fiber switching
 and process-wide callback enumeration are still pending, so the FLS surface is
 classified as partial even though its symbols are available.
 
-GS installation, a guest stack, guarded crash isolation, recursive DLL loading,
-API Sets, PE TLS, and exception/unwind support are the next loader milestones.
-See [ROADMAP.md](ROADMAP.md) for the ordered compatibility plan and
+Completing the launcher's KERNEL32 surface, recursive DLL loading, complete API
+Set contract mapping, PE TLS, and exception/unwind support are the next loader
+milestones. See
+[ROADMAP.md](ROADMAP.md) for the ordered compatibility plan and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries.
 
 ## Build
@@ -84,9 +99,11 @@ In a container or debugger where LeakSanitizer cannot attach, use
 `make sanitize-no-leaks`; address and undefined-behavior checks remain enabled.
 
 `map` now reserves the image at its real execution address and applies final PE
-page protections. `run` deliberately stops before calling arbitrary guest code
-until the isolated GS/TEB dispatcher exists. Its exit code is `3`, which makes
-automation distinguish “valid but not runnable yet” from malformed input.
+page protections. The isolated GS/TEB worker is intentionally restricted to
+repository fixtures; `run` still stops before calling arbitrary guest code
+until the remaining launcher imports and recursive dependency binding exist.
+Its exit code is `3`, which makes automation distinguish “valid but not
+runnable yet” from malformed input.
 
 `link-check` registers the supplied PE DLL and SadLayer's built-in KERNEL32,
 reports which executable imports it can resolve, and binds the IAT only when

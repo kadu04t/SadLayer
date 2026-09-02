@@ -405,10 +405,15 @@ static bool test_module_registry_resolution(void) {
     sl_module_registry_init(&registry);
     CHECK(sl_module_registry_add(&registry, "UnityPlayer.dll", &unity_image,
                                  &unity_mapped) == SL_OK);
-    CHECK(sl_module_registry_add(&registry, "KERNEL32.dll", &kernel_image,
+    CHECK(sl_module_registry_add(&registry, "KernelHost.dll", &kernel_image,
                                  &kernel_mapped) == SL_OK);
+    CHECK(sl_module_registry_add_alias(&registry, "KERNEL32.dll",
+                                       "kernelhost.DLL") == SL_OK);
     CHECK(sl_module_registry_add(&registry, "kernel32.DLL", &kernel_image,
                                  &kernel_mapped) ==
+          SL_ERROR_DUPLICATE_MODULE);
+    CHECK(sl_module_registry_add(&registry, "UNITYPLAYER.DLL", &unity_image,
+                                 &unity_mapped) ==
           SL_ERROR_DUPLICATE_MODULE);
 
     sl_pe_import_symbol import = {
@@ -438,6 +443,249 @@ static bool test_module_registry_resolution(void) {
           SL_ERROR_MODULE_NOT_FOUND);
     sl_loader_unmap_image(&kernel_mapped);
     sl_loader_unmap_image(&unity_mapped);
+    return true;
+}
+
+static bool test_module_alias_registry(void) {
+    static const sl_native_export exports[] = {
+        {.name = "HostSymbol",
+         .forwarder = NULL,
+         .ordinal = 7U,
+         .has_ordinal = true,
+         .guest_address = UINT64_C(0x71001000)},
+    };
+    sl_module_registry registry;
+    sl_module_registry_init(&registry);
+    CHECK(registry.count == 0U);
+    CHECK(registry.alias_count == 0U);
+    CHECK(sl_module_registry_add_native(
+              &registry, "KernelBase.dll", exports,
+              sizeof(exports) / sizeof(exports[0])) == SL_OK);
+
+    char contract_name[] = "api-ms-win-core-test-l1-1-0.dll";
+    char target_name[] = "kernelbase.DLL";
+    CHECK(sl_module_registry_add_alias(&registry, contract_name, target_name) ==
+          SL_OK);
+    CHECK(registry.alias_count == 1U);
+    contract_name[0] = 'x';
+    target_name[0] = 'x';
+
+    const sl_loaded_module *target =
+        sl_module_registry_find(&registry, "KERNELBASE.dll");
+    CHECK(target == &registry.modules[0]);
+    CHECK(sl_module_registry_find(
+              &registry, "API-MS-WIN-CORE-TEST-L1-1-0.DLL") == NULL);
+
+    const sl_loaded_module *module = &registry.modules[1];
+    CHECK(sl_module_registry_resolve_module(&registry, "kernelbase.DLL",
+                                            &module) == SL_OK);
+    CHECK(module == target);
+    module = &registry.modules[1];
+    CHECK(sl_module_registry_resolve_module(
+              &registry, "API-MS-WIN-CORE-TEST-L1-1-0.DLL", &module) ==
+          SL_OK);
+    CHECK(module == target);
+
+    const sl_loaded_module *sentinel = &registry.modules[1];
+    module = sentinel;
+    CHECK(sl_module_registry_resolve_module(&registry, "missing.dll",
+                                            &module) ==
+          SL_ERROR_MODULE_NOT_FOUND);
+    CHECK(module == sentinel);
+    CHECK(sl_module_registry_resolve_module(&registry, NULL, &module) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(module == sentinel);
+    CHECK(sl_module_registry_resolve_module(&registry, "KernelBase.dll",
+                                            NULL) ==
+          SL_ERROR_INVALID_ARGUMENT);
+
+    char overlong_name[SL_MODULE_NAME_CAPACITY + 1U];
+    memset(overlong_name, 'a', sizeof(overlong_name));
+    overlong_name[SL_MODULE_NAME_CAPACITY] = '\0';
+    CHECK(sl_module_registry_resolve_module(&registry, overlong_name,
+                                            &module) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(module == sentinel);
+
+    char maximum_name[SL_MODULE_NAME_CAPACITY];
+    memset(maximum_name, 'm', sizeof(maximum_name));
+    maximum_name[SL_MODULE_NAME_CAPACITY - 1U] = '\0';
+    CHECK(sl_module_registry_add_alias(&registry, maximum_name,
+                                       "KernelBase.dll") == SL_OK);
+    CHECK(sl_module_registry_resolve_module(&registry, maximum_name, &module) ==
+          SL_OK);
+    CHECK(module == target);
+
+    size_t original_alias_count = registry.alias_count;
+    CHECK(sl_module_registry_add_alias(NULL, "api-null.dll",
+                                       "KernelBase.dll") ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_module_registry_add_alias(&registry, NULL, "KernelBase.dll") ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_module_registry_add_alias(&registry, "", "KernelBase.dll") ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_module_registry_add_alias(&registry, "api-empty-target.dll",
+                                       "") == SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_module_registry_add_alias(&registry, overlong_name,
+                                       "KernelBase.dll") ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_module_registry_add_alias(&registry, "api-overlong-target.dll",
+                                       overlong_name) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_module_registry_add_alias(&registry, "api-missing.dll",
+                                       "missing.dll") ==
+          SL_ERROR_MODULE_NOT_FOUND);
+    CHECK(sl_module_registry_add_alias(
+              &registry, "api-alias-chain.dll",
+              "api-ms-win-core-test-l1-1-0.dll") ==
+          SL_ERROR_MODULE_NOT_FOUND);
+    CHECK(sl_module_registry_add_alias(&registry, "KERNELBASE.DLL",
+                                       "KernelBase.dll") ==
+          SL_ERROR_DUPLICATE_MODULE);
+    CHECK(sl_module_registry_add_alias(
+              &registry, "API-MS-WIN-CORE-TEST-L1-1-0.DLL",
+              "KernelBase.dll") == SL_ERROR_DUPLICATE_MODULE);
+    CHECK(registry.alias_count == original_alias_count);
+
+    CHECK(sl_module_registry_add_native(
+              &registry, "api-ms-win-core-test-l1-1-0.dll", exports,
+              sizeof(exports) / sizeof(exports[0])) ==
+          SL_ERROR_DUPLICATE_MODULE);
+    CHECK(registry.count == 1U);
+
+    for (size_t index = registry.alias_count;
+         index < SL_MODULE_ALIAS_CAPACITY; ++index) {
+        char generated_name[SL_MODULE_NAME_CAPACITY];
+        int written = snprintf(generated_name, sizeof(generated_name),
+                               "api-capacity-%zu.dll", index);
+        CHECK(written > 0);
+        CHECK((size_t)written < sizeof(generated_name));
+        CHECK(sl_module_registry_add_alias(&registry, generated_name,
+                                           "KernelBase.dll") == SL_OK);
+    }
+    CHECK(registry.alias_count == SL_MODULE_ALIAS_CAPACITY);
+    CHECK(sl_module_registry_add_alias(&registry, "api-capacity-overflow.dll",
+                                       "KernelBase.dll") ==
+          SL_ERROR_MODULE_REGISTRY_FULL);
+    CHECK(registry.alias_count == SL_MODULE_ALIAS_CAPACITY);
+    return true;
+}
+
+static bool test_module_alias_symbol_resolution(void) {
+    static const sl_native_export target_exports[] = {
+        {.name = "RealName",
+         .forwarder = NULL,
+         .ordinal = 42U,
+         .has_ordinal = true,
+         .guest_address = UINT64_C(0x72004200)},
+    };
+    static const sl_native_export forwarding_exports[] = {
+        {.name = "ByName",
+         .forwarder = "api-ms-win-core-test-l1-1-0.RealName",
+         .ordinal = 1U,
+         .has_ordinal = true,
+         .guest_address = 0U},
+        {.name = "ByOrdinal",
+         .forwarder = "api-ms-win-core-test-l1-1-0.#42",
+         .ordinal = 2U,
+         .has_ordinal = true,
+         .guest_address = 0U},
+    };
+    sl_module_registry registry;
+    sl_module_registry_init(&registry);
+    CHECK(sl_module_registry_add_native(
+              &registry, "KernelBase.dll", target_exports,
+              sizeof(target_exports) / sizeof(target_exports[0])) == SL_OK);
+    CHECK(sl_module_registry_add_alias(
+              &registry, "api-ms-win-core-test-l1-1-0.dll",
+              "KernelBase.dll") == SL_OK);
+    CHECK(sl_module_registry_add_native(
+              &registry, "Forwarder.dll", forwarding_exports,
+              sizeof(forwarding_exports) / sizeof(forwarding_exports[0])) ==
+          SL_OK);
+
+    sl_module_symbol query = {
+        .module_name = "API-MS-WIN-CORE-TEST-L1-1-0.DLL",
+        .symbol_name = "RealName",
+        .ordinal = 0U,
+        .by_ordinal = false,
+    };
+    sl_resolved_symbol resolved;
+    CHECK(sl_module_registry_resolve_symbol(&registry, &query, &resolved) ==
+          SL_OK);
+    CHECK(resolved.module == &registry.modules[0]);
+    CHECK(resolved.is_native);
+    CHECK(resolved.guest_address == UINT64_C(0x72004200));
+    CHECK(resolved.forward_depth == 0U);
+
+    query.symbol_name = NULL;
+    query.ordinal = 42U;
+    query.by_ordinal = true;
+    CHECK(sl_module_registry_resolve_symbol(&registry, &query, &resolved) ==
+          SL_OK);
+    CHECK(resolved.module == &registry.modules[0]);
+    CHECK(resolved.guest_address == UINT64_C(0x72004200));
+    CHECK(resolved.forward_depth == 0U);
+
+    query.module_name = "Forwarder.dll";
+    query.symbol_name = "ByName";
+    query.ordinal = 0U;
+    query.by_ordinal = false;
+    CHECK(sl_module_registry_resolve_symbol(&registry, &query, &resolved) ==
+          SL_OK);
+    CHECK(resolved.module == &registry.modules[0]);
+    CHECK(resolved.guest_address == UINT64_C(0x72004200));
+    CHECK(resolved.forward_depth == 1U);
+
+    query.symbol_name = "ByOrdinal";
+    CHECK(sl_module_registry_resolve_symbol(&registry, &query, &resolved) ==
+          SL_OK);
+    CHECK(resolved.module == &registry.modules[0]);
+    CHECK(resolved.guest_address == UINT64_C(0x72004200));
+    CHECK(resolved.forward_depth == 1U);
+
+    sl_pe_import_symbol import = {
+        .module_name = "api-ms-win-core-test-l1-1-0.dll",
+        .symbol_name = "RealName",
+        .iat_rva = 0U,
+        .hint = 0U,
+        .ordinal = 0U,
+        .by_ordinal = false,
+    };
+    CHECK(sl_module_registry_resolve(&registry, &import, &resolved) == SL_OK);
+    CHECK(resolved.guest_address == UINT64_C(0x72004200));
+
+    sl_resolved_symbol unchanged = {
+        .module = &registry.modules[1],
+        .export =
+            {.name = "sentinel",
+             .forwarder = "sentinel.forwarder",
+             .ordinal = 77U,
+             .rva = 0x1234U,
+             .is_forwarder = true},
+        .guest_address = UINT64_C(0xfeedface),
+        .forward_depth = 99U,
+        .is_native = false,
+    };
+    resolved = unchanged;
+    import.symbol_name = "Missing";
+    CHECK(sl_module_registry_resolve(&registry, &import, &resolved) ==
+          SL_ERROR_EXPORT_NOT_FOUND);
+    CHECK(resolved.module == unchanged.module);
+    CHECK(resolved.export.name == unchanged.export.name);
+    CHECK(resolved.export.forwarder == unchanged.export.forwarder);
+    CHECK(resolved.export.ordinal == unchanged.export.ordinal);
+    CHECK(resolved.export.rva == unchanged.export.rva);
+    CHECK(resolved.export.is_forwarder == unchanged.export.is_forwarder);
+    CHECK(resolved.guest_address == unchanged.guest_address);
+    CHECK(resolved.forward_depth == unchanged.forward_depth);
+    CHECK(resolved.is_native == unchanged.is_native);
+
+    uint64_t guest_address = UINT64_C(0xabad1dea);
+    CHECK(sl_module_registry_import_resolver(&import, &guest_address,
+                                             &registry) ==
+          SL_ERROR_EXPORT_NOT_FOUND);
+    CHECK(guest_address == UINT64_C(0xabad1dea));
     return true;
 }
 
@@ -596,7 +844,11 @@ static bool test_registry_backed_iat_binding(void) {
           SL_OK);
     CHECK(sl_loader_map_image(&image, &mapped) == SL_OK);
     sl_module_registry_init(&registry);
-    CHECK(sl_module_registry_add(&registry, "KERNEL32.dll", &image, &mapped) ==
+    CHECK(sl_module_registry_add(&registry, "KernelHost.dll", &image,
+                                 &mapped) ==
+          SL_OK);
+    CHECK(sl_module_registry_add_alias(&registry, "KERNEL32.dll",
+                                       "KernelHost.dll") ==
           SL_OK);
     CHECK(sl_loader_bind_imports(&image, &mapped,
                                  sl_module_registry_import_resolver, &registry,
@@ -604,6 +856,21 @@ static bool test_registry_backed_iat_binding(void) {
     CHECK(bound_count == 2U);
     CHECK(get_u64(mapped.bytes, 0x1090U) == mapped.load_base + 0x1050U);
     CHECK(get_u64(mapped.bytes, 0x1098U) == mapped.load_base + 0x1050U);
+    sl_loader_unmap_image(&mapped);
+
+    put_u64(fixture, 0x298U, UINT64_C(0x8000000000000003));
+    CHECK(sl_pe_parse((sl_byte_view){fixture, sizeof(fixture)}, &image) ==
+          SL_OK);
+    CHECK(sl_loader_map_image(&image, &mapped) == SL_OK);
+    uint64_t original_name = get_u64(mapped.bytes, 0x1090U);
+    uint64_t original_ordinal = get_u64(mapped.bytes, 0x1098U);
+    bound_count = 99U;
+    CHECK(sl_loader_bind_imports(&image, &mapped,
+                                 sl_module_registry_import_resolver, &registry,
+                                 &bound_count) == SL_ERROR_EXPORT_NOT_FOUND);
+    CHECK(bound_count == 0U);
+    CHECK(get_u64(mapped.bytes, 0x1090U) == original_name);
+    CHECK(get_u64(mapped.bytes, 0x1098U) == original_ordinal);
     sl_loader_unmap_image(&mapped);
     return true;
 }
@@ -642,6 +909,9 @@ int main(void) {
          test_relocation_failures_are_atomic},
         {"find exports", test_export_lookup},
         {"resolve modules and forwarders", test_module_registry_resolution},
+        {"manage module aliases", test_module_alias_registry},
+        {"resolve symbols through module aliases",
+         test_module_alias_symbol_resolution},
         {"resolve native modules", test_native_module_resolution},
         {"bind IAT atomically", test_atomic_iat_binding},
         {"bind IAT from module registry", test_registry_backed_iat_binding},

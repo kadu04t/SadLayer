@@ -32,6 +32,36 @@ static bool ascii_equal_ignore_case(const char *left, const char *right) {
     return *left == *right;
 }
 
+static bool module_name_length(const char *name, size_t *length) {
+    if (name == NULL || length == NULL) {
+        return false;
+    }
+    for (size_t index = 0U; index < SL_MODULE_NAME_CAPACITY; ++index) {
+        if (name[index] == '\0') {
+            if (index == 0U) {
+                return false;
+            }
+            *length = index;
+            return true;
+        }
+    }
+    return false;
+}
+
+static const sl_module_alias *find_alias(const sl_module_registry *registry,
+                                         const char *name) {
+    if (registry == NULL || name == NULL) {
+        return NULL;
+    }
+    for (size_t index = 0U; index < registry->alias_count; ++index) {
+        if (ascii_equal_ignore_case(registry->aliases[index].contract_name,
+                                    name)) {
+            return &registry->aliases[index];
+        }
+    }
+    return NULL;
+}
+
 void sl_module_registry_init(sl_module_registry *registry) {
     if (registry != NULL) {
         memset(registry, 0, sizeof(*registry));
@@ -54,16 +84,14 @@ const sl_loaded_module *sl_module_registry_find(
 sl_status sl_module_registry_add(sl_module_registry *registry, const char *name,
                                  const sl_pe_image *image,
                                  const sl_mapped_image *mapped) {
-    if (registry == NULL || name == NULL || name[0] == '\0' || image == NULL ||
-        mapped == NULL || mapped->bytes == NULL ||
-        mapped->size != image->image_size) {
+    size_t name_length = 0U;
+    if (registry == NULL || image == NULL || mapped == NULL ||
+        mapped->bytes == NULL || mapped->size != image->image_size ||
+        !module_name_length(name, &name_length)) {
         return SL_ERROR_INVALID_ARGUMENT;
     }
-    size_t name_length = strlen(name);
-    if (name_length >= SL_MODULE_NAME_CAPACITY) {
-        return SL_ERROR_INVALID_ARGUMENT;
-    }
-    if (sl_module_registry_find(registry, name) != NULL) {
+    if (sl_module_registry_find(registry, name) != NULL ||
+        find_alias(registry, name) != NULL) {
         return SL_ERROR_DUPLICATE_MODULE;
     }
     if (registry->count >= SL_MODULE_REGISTRY_CAPACITY) {
@@ -85,15 +113,13 @@ sl_status sl_module_registry_add(sl_module_registry *registry, const char *name,
 sl_status sl_module_registry_add_native(
     sl_module_registry *registry, const char *name,
     const sl_native_export *exports, size_t export_count) {
-    if (registry == NULL || name == NULL || name[0] == '\0' ||
-        exports == NULL || export_count == 0U) {
+    size_t name_length = 0U;
+    if (registry == NULL || exports == NULL || export_count == 0U ||
+        !module_name_length(name, &name_length)) {
         return SL_ERROR_INVALID_ARGUMENT;
     }
-    size_t name_length = strlen(name);
-    if (name_length >= SL_MODULE_NAME_CAPACITY) {
-        return SL_ERROR_INVALID_ARGUMENT;
-    }
-    if (sl_module_registry_find(registry, name) != NULL) {
+    if (sl_module_registry_find(registry, name) != NULL ||
+        find_alias(registry, name) != NULL) {
         return SL_ERROR_DUPLICATE_MODULE;
     }
     if (registry->count >= SL_MODULE_REGISTRY_CAPACITY) {
@@ -129,6 +155,61 @@ sl_status sl_module_registry_add_native(
     };
     memcpy(module->name, name, name_length + 1U);
     ++registry->count;
+    return SL_OK;
+}
+
+sl_status sl_module_registry_add_alias(sl_module_registry *registry,
+                                       const char *contract_name,
+                                       const char *target_name) {
+    size_t contract_length = 0U;
+    size_t target_length = 0U;
+    if (registry == NULL ||
+        !module_name_length(contract_name, &contract_length) ||
+        !module_name_length(target_name, &target_length)) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    if (sl_module_registry_find(registry, contract_name) != NULL ||
+        find_alias(registry, contract_name) != NULL) {
+        return SL_ERROR_DUPLICATE_MODULE;
+    }
+    const sl_loaded_module *target =
+        sl_module_registry_find(registry, target_name);
+    if (target == NULL) {
+        return SL_ERROR_MODULE_NOT_FOUND;
+    }
+    if (registry->alias_count >= SL_MODULE_ALIAS_CAPACITY) {
+        return SL_ERROR_MODULE_REGISTRY_FULL;
+    }
+
+    sl_module_alias *alias = &registry->aliases[registry->alias_count];
+    memcpy(alias->contract_name, contract_name, contract_length + 1U);
+    memcpy(alias->target_name, target->name, target_length + 1U);
+    ++registry->alias_count;
+    return SL_OK;
+}
+
+sl_status sl_module_registry_resolve_module(
+    const sl_module_registry *registry, const char *name,
+    const sl_loaded_module **result) {
+    size_t name_length = 0U;
+    if (registry == NULL || result == NULL ||
+        !module_name_length(name, &name_length)) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    (void)name_length;
+
+    const sl_loaded_module *module = sl_module_registry_find(registry, name);
+    if (module == NULL) {
+        const sl_module_alias *alias = find_alias(registry, name);
+        if (alias == NULL) {
+            return SL_ERROR_MODULE_NOT_FOUND;
+        }
+        module = sl_module_registry_find(registry, alias->target_name);
+        if (module == NULL) {
+            return SL_ERROR_MODULE_NOT_FOUND;
+        }
+    }
+    *result = module;
     return SL_OK;
 }
 
@@ -185,10 +266,11 @@ static sl_status resolve_symbol_recursive(
     if (depth > SL_FORWARDER_DEPTH_LIMIT) {
         return SL_ERROR_FORWARDER_LIMIT;
     }
-    const sl_loaded_module *module =
-        sl_module_registry_find(registry, module_name);
-    if (module == NULL) {
-        return SL_ERROR_MODULE_NOT_FOUND;
+    const sl_loaded_module *module = NULL;
+    sl_status status =
+        sl_module_registry_resolve_module(registry, module_name, &module);
+    if (status != SL_OK) {
+        return status;
     }
 
     if (module->kind == SL_MODULE_NATIVE) {
@@ -211,7 +293,7 @@ static sl_status resolve_symbol_recursive(
             const char *forwarded_symbol = NULL;
             uint32_t forwarded_ordinal = 0U;
             bool forwarded_by_ordinal = false;
-            sl_status status = parse_forwarder(
+            status = parse_forwarder(
                 native_export->forwarder, forwarded_module,
                 sizeof(forwarded_module), &forwarded_symbol,
                 &forwarded_ordinal, &forwarded_by_ordinal);
@@ -240,11 +322,10 @@ static sl_status resolve_symbol_recursive(
     }
 
     sl_pe_export export;
-    sl_status status = by_ordinal
-                           ? sl_pe_find_export_by_ordinal(module->image, ordinal,
-                                                          &export)
-                           : sl_pe_find_export_by_name(module->image, symbol_name,
-                                                       &export);
+    status = by_ordinal
+                 ? sl_pe_find_export_by_ordinal(module->image, ordinal, &export)
+                 : sl_pe_find_export_by_name(module->image, symbol_name,
+                                             &export);
     if (status != SL_OK) {
         return status;
     }
@@ -301,9 +382,14 @@ sl_status sl_module_registry_resolve_symbol(
         (!symbol->by_ordinal && symbol->symbol_name == NULL)) {
         return SL_ERROR_INVALID_ARGUMENT;
     }
-    return resolve_symbol_recursive(
+    sl_resolved_symbol resolved;
+    sl_status status = resolve_symbol_recursive(
         registry, symbol->module_name, symbol->symbol_name, symbol->ordinal,
-        symbol->by_ordinal, 0U, result);
+        symbol->by_ordinal, 0U, &resolved);
+    if (status == SL_OK) {
+        *result = resolved;
+    }
+    return status;
 }
 
 sl_status sl_module_registry_import_resolver(

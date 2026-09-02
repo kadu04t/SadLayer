@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 
 #include "sadlayer/context.h"
 #include "sadlayer/kernel32.h"
@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <threads.h>
 #include <unistd.h>
@@ -1642,7 +1643,8 @@ static sl_win32_bool SL_WINAPI sl_kernel32_close_handle(void *handle) {
 }
 
 static _Noreturn void SL_WINAPI sl_kernel32_exit_process(uint32_t exit_code) {
-    exit((int)exit_code);
+    (void)syscall(SYS_exit_group, (int)exit_code);
+    abort();
 }
 
 static sl_win32_bool SL_WINAPI sl_kernel32_terminate_process(void *process,
@@ -1651,7 +1653,8 @@ static sl_win32_bool SL_WINAPI sl_kernel32_terminate_process(void *process,
         sl_last_error = SL_ERROR_INVALID_HANDLE;
         return SL_WIN32_FALSE;
     }
-    _Exit((int)code);
+    (void)syscall(SYS_exit_group, (int)code);
+    abort();
 }
 
 static uint64_t function_address(const void *representation, size_t size) {

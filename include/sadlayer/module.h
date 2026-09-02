@@ -9,6 +9,7 @@
 #include "sadlayer/pe.h"
 
 #define SL_MODULE_REGISTRY_CAPACITY 128U
+#define SL_MODULE_ALIAS_CAPACITY 128U
 #define SL_MODULE_NAME_CAPACITY 128U
 
 typedef enum {
@@ -34,8 +35,15 @@ typedef struct {
 } sl_loaded_module;
 
 typedef struct {
+    char contract_name[SL_MODULE_NAME_CAPACITY];
+    char target_name[SL_MODULE_NAME_CAPACITY];
+} sl_module_alias;
+
+typedef struct {
     sl_loaded_module modules[SL_MODULE_REGISTRY_CAPACITY];
     size_t count;
+    sl_module_alias aliases[SL_MODULE_ALIAS_CAPACITY];
+    size_t alias_count;
 } sl_module_registry;
 
 typedef struct {
@@ -60,13 +68,29 @@ sl_status sl_module_registry_add(sl_module_registry *registry, const char *name,
 /*
  * Native export tables and their strings are borrowed. They must remain
  * immutable and alive for the registry's lifetime. Publish a registry to other
- * threads only after all modules have been added.
+ * threads only after all modules and aliases have been added.
  */
 sl_status sl_module_registry_add_native(
     sl_module_registry *registry, const char *name,
     const sl_native_export *exports, size_t export_count);
+/*
+ * Alias names are copied, compared case-insensitively, and cannot shadow a
+ * module or another alias. target_name must name a directly registered module;
+ * alias chains are deliberately rejected.
+ */
+sl_status sl_module_registry_add_alias(sl_module_registry *registry,
+                                       const char *contract_name,
+                                       const char *target_name);
 const sl_loaded_module *sl_module_registry_find(
     const sl_module_registry *registry, const char *name);
+/*
+ * Resolves either a directly registered module or one non-recursive alias.
+ * result is modified only on success; sl_module_registry_find remains a direct
+ * module lookup and intentionally does not follow aliases.
+ */
+sl_status sl_module_registry_resolve_module(
+    const sl_module_registry *registry, const char *name,
+    const sl_loaded_module **result);
 sl_status sl_module_registry_resolve_symbol(
     const sl_module_registry *registry, const sl_module_symbol *symbol,
     sl_resolved_symbol *result);

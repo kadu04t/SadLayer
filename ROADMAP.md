@@ -41,11 +41,16 @@ Implement, in order:
   page-granular PE protections under a W^X policy.
 - [x] Controlled `ms_abi` handoff for a trusted synthetic PE that calls two
   built-in KERNEL32 exports through its real IAT and returns to the host.
-- [ ] Isolated subprocess worker on a guarded guest stack with GS/TEB
-  installation and restoration around the synthetic handoff.
-- [ ] Alternate signal stack and fixed-format crash reporting that survives a
+- [x] Isolated subprocess worker on a guarded guest stack with GS/TEB
+  installation/restoration and normalized child signal state around the
+  synthetic handoff, while preserving the parent signal mask.
+- [x] Alternate signal stack and fixed-format crash reporting that survives a
   destroyed guest stack and leaves the parent runtime usable.
-- [ ] Recursive DLL discovery, delay imports, and API Set contracts.
+- [x] Explicit bounded, case-insensitive, one-hop module aliases shared by
+  imports, IAT binding, and forwarders, providing the routing primitive for
+  synthetic API Set contracts.
+- [ ] Recursive DLL discovery and delay imports.
+- [ ] API Set schema/policy and authoritative contract-to-host mappings.
 - [ ] PE TLS directory, callbacks, and per-module thread data.
 - [ ] Structured tracing for module load, symbol resolution, calls, and last
   error.
@@ -53,8 +58,12 @@ Implement, in order:
 Exit gate: a synthetic Windows fixture calls a built-in `kernel32` function from
 its real entry point and returns the expected code to the host.
 
-The direct-call portion of this gate is satisfied. It is not yet the guarded
-worker required before accepting arbitrary PE input.
+The guarded synthetic gate is satisfied, including fixed crash context from an
+alternate stack after the guest destroys RSP and hits a guard page. Arbitrary
+PE input remains disabled until the loader can bind the complete dependency
+graph and provide the remaining launcher runtime contracts. Module aliases are
+only the routing substrate; no Windows API Set schema or target mapping is
+claimed yet.
 
 ## Stage 2 — NT and kernel32 foundation
 
@@ -71,8 +80,10 @@ Implement the minimum coherent process model rather than isolated stubs:
   future process object.
 - [x] Minimal measured PEB, process-parameters, and guarded TEB memory layouts;
   KERNEL32 last-error aliases the TEB cell when attached.
-- [ ] GS-backed TEB installation, guest stack, PE TLS directory/callbacks,
-  validated guest pointers, and coherent handles/object lifetimes.
+- [x] GS-backed TEB installation and guarded guest stack for the isolated
+  bootstrap worker.
+- [ ] PE TLS directory/callbacks, validated guest pointers, and coherent
+  handles/object lifetimes.
 - [ ] Fiber contexts and process-wide FLS callback enumeration.
 - [ ] Current directory, Windows path normalization, virtual memory, files,
   directories, mappings, waits, synchronization objects, and threads.
@@ -87,16 +98,19 @@ TLS, timing, environment, and loader tests under SadLayer.
 
 1. [x] Map PE images at their real process addresses with final page protections
    instead of treating `load_base` as metadata over `calloc`.
-2. [ ] Install the prepared TEB/PEB through GS, switch to a guarded guest stack,
+2. [x] Install the prepared TEB/PEB through GS, switch to a guarded guest stack,
    and expose stack bounds and process parameters before guest code.
-3. [ ] Move the passing synthetic PE entry-point fixture under guarded
-   signal/crash tracing in an isolated worker.
-4. [ ] Complete the launcher's remaining KERNEL32 imports through coherent module,
-   handle/filesystem, and x64 exception/unwind subsystems.
-5. [ ] Recursively load, relocate, and bind UnityPlayer and its dependency graph; the
-   current link check only examines the executable.
-6. [ ] Resolve API Set contracts and implement DLL initialization order, `DllMain`,
-   PE TLS data, and TLS callbacks.
+3. [x] Move the passing synthetic PE entry-point fixture into an isolated worker
+   and prove that a guard-page signal leaves the parent runtime usable.
+4. [x] Capture fixed-format register/fault context from an alternate signal
+   stack before the worker exits.
+5. [ ] Complete the launcher's remaining KERNEL32 imports through coherent
+   module, handle/filesystem, and x64 exception/unwind subsystems.
+6. [ ] Recursively load, relocate, and bind UnityPlayer and its dependency
+   graph; the current link check only examines the executable.
+7. [ ] Populate real API Set contract mappings—the manual alias primitive is
+   only plumbing—and implement DLL initialization order, `DllMain`, PE TLS
+   data, and TLS callbacks.
 
 ## Stage 3 — Unity/Mono startup surface
 

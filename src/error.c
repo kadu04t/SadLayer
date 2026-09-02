@@ -54,6 +54,12 @@ const char *sl_status_string(sl_status status) {
         return "PE page would be writable and executable";
     case SL_ERROR_INVALID_STATE:
         return "operation is invalid in the current runtime state";
+    case SL_ERROR_PROCESS_CREATION:
+        return "guest worker process creation failed";
+    case SL_ERROR_THREAD_ENVIRONMENT:
+        return "guest thread environment setup failed";
+    case SL_ERROR_WORKER_PROTOCOL:
+        return "guest worker returned an invalid report";
     case SL_ERROR_NOT_IMPLEMENTED:
         return "not implemented yet";
     default:

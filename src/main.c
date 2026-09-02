@@ -361,7 +361,8 @@ int main(int argc, char **argv) {
         status = map_image(&image);
         if (status == SL_OK && run) {
             fputs("sadlayer: arbitrary guest handoff is disabled; the guarded "
-                  "GS/TEB worker is the next execution gate.\n",
+                  "worker remains fixture-only until remaining launcher APIs "
+                  "and recursive dependency binding are ready.\n",
                   stderr);
             status = SL_ERROR_NOT_IMPLEMENTED;
         }
