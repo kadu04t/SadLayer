@@ -23,6 +23,8 @@
 #define FIXTURE_TERMINATE_CODE 197
 #define FIXTURE_RELOCATED_RVA 0x2140U
 #define FIXTURE_RELOCATED_OFFSET UINT64_C(0x1234)
+/* Linux/glibc may add this private trampoline flag when restoring an action. */
+#define SL_TEST_SA_RESTORER 0x04000000
 #define EXPECTED_CRASH_FLAGS                                                \
     (SL_RUNTIME_REPORT_HAS_CRASH_CONTEXT |                                  \
      SL_RUNTIME_REPORT_HAS_SIGNAL_CODE |                                    \
@@ -332,7 +334,8 @@ static bool signal_sets_are_equal(const sigset_t *left,
 static bool signal_actions_are_equal(const struct sigaction *left,
                                      const struct sigaction *right) {
     return left->sa_handler == right->sa_handler &&
-           left->sa_flags == right->sa_flags &&
+           (left->sa_flags & ~SL_TEST_SA_RESTORER) ==
+               (right->sa_flags & ~SL_TEST_SA_RESTORER) &&
            signal_sets_are_equal(&left->sa_mask, &right->sa_mask);
 }
 

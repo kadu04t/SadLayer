@@ -49,6 +49,28 @@ static int register_kernel32_on_thread(void *opaque) {
     return context->passed ? 0 : 1;
 }
 
+static bool test_module_space_registration(void) {
+    sl_module_space *space = NULL;
+    sl_resolved_symbol resolved;
+
+    CHECK(sl_kernel32_register_space(NULL) == SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_module_space_create(&space) == SL_OK);
+    CHECK(sl_kernel32_register_space(space) == SL_OK);
+    CHECK(sl_module_space_owned_count(space) == 0U);
+    CHECK(sl_module_space_registry(space)->count == 1U);
+    const sl_loaded_module *module =
+        sl_module_registry_find(sl_module_space_registry(space),
+                                "kernel32.DLL");
+    CHECK(module != NULL && module->kind == SL_MODULE_NATIVE);
+    CHECK(resolve_name(sl_module_space_registry(space), "GetLastError",
+                       &resolved) == SL_OK);
+    CHECK(resolved.is_native && resolved.guest_address != 0U);
+    CHECK(sl_kernel32_register_space(space) == SL_ERROR_DUPLICATE_MODULE);
+
+    sl_module_space_destroy(space);
+    return true;
+}
+
 static bool test_export_surface_and_abi(void) {
     static const char *const implemented[] = {
         "GetLastError",          "SetLastError",
@@ -804,6 +826,7 @@ int main(void) {
         bool (*run)(void);
     } tests[] = {
         {"export surface and ms ABI", test_export_surface_and_abi},
+        {"module-space registration", test_module_space_registration},
         {"last-error and TLS", test_last_error_and_tls},
         {"TLS concurrent index reuse", test_tls_concurrent_reuse},
         {"nested thread contexts", test_context_scopes},

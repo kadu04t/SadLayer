@@ -67,7 +67,9 @@ integrating Windows API Set schema/policy remain loader gates.
 The first loader path must support x86-64 base relocations, named and ordinal
 imports, API Set aliases, DLL export lookup, IAT patching, TLS inspection, and
 x64 unwind metadata. Generic alias-aware import/IAT/forwarder plumbing now
-exists, but authoritative mappings for the target contracts are still required.
+exists, and explicitly supplied PE files can now share an owning module space;
+recursive discovery and authoritative mappings for the target contracts are
+still required.
 The inventory does not prove which graphics path is chosen at runtime, so both
 imported graphics families remain candidates until tracing captures the actual
 initialization path.

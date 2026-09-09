@@ -49,6 +49,9 @@ Implement, in order:
 - [x] Explicit bounded, case-insensitive, one-hop module aliases shared by
   imports, IAT binding, and forwarders, providing the routing primitive for
   synthetic API Set contracts.
+- [x] Owning module space for explicitly supplied PE files, keeping source
+  bytes, parsed images, and execution-intended mappings stable with per-add
+  rollback.
 - [ ] Recursive DLL discovery and delay imports.
 - [ ] API Set schema/policy and authoritative contract-to-host mappings.
 - [ ] PE TLS directory, callbacks, and per-module thread data.
@@ -62,8 +65,8 @@ The guarded synthetic gate is satisfied, including fixed crash context from an
 alternate stack after the guest destroys RSP and hits a guard page. Arbitrary
 PE input remains disabled until the loader can bind the complete dependency
 graph and provide the remaining launcher runtime contracts. Module aliases are
-only the routing substrate; no Windows API Set schema or target mapping is
-claimed yet.
+only the routing substrate, and the owned space does not discover or initialize
+dependencies yet; no Windows API Set schema or target mapping is claimed.
 
 ## Stage 2 — NT and kernel32 foundation
 

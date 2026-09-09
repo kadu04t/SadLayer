@@ -5,9 +5,9 @@ CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror -O2
 LDFLAGS ?=
 THREAD_FLAGS ?= -pthread
 
-LIB_SOURCES := src/error.c src/pe.c src/loader.c src/module.c src/unicode.c \
-	src/process.c src/context.c src/teb.c src/win32.c src/kernel32.c \
-	src/runtime.c
+LIB_SOURCES := src/error.c src/pe.c src/loader.c src/module.c \
+	src/module_space.c src/unicode.c src/process.c src/context.c src/teb.c \
+	src/win32.c src/kernel32.c src/runtime.c
 CLI_SOURCES := src/main.c
 TEST_PE_SOURCES := tests/test_pe.c
 TEST_KERNEL32_SOURCES := tests/test_kernel32.c

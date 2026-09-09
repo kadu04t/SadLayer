@@ -1801,5 +1801,12 @@ sl_status sl_kernel32_register(sl_module_registry *registry) {
         sl_kernel32_export_count);
 }
 
+sl_status sl_kernel32_register_space(sl_module_space *space) {
+    call_once(&sl_kernel32_exports_once, initialize_kernel32_exports);
+    return sl_module_space_add_native(
+        space, "KERNEL32.dll", sl_kernel32_exports, sl_kernel32_export_count,
+        NULL);
+}
+
 #undef SL_ADD_EXPORT
 #undef sl_last_error

@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "sadlayer/module.h"
+#include "sadlayer/module_space.h"
 #include "sadlayer/win32.h"
 
 #define SL_WIN32_FALSE 0
@@ -38,7 +38,10 @@ typedef struct {
     uint32_t high_date_time;
 } sl_win32_filetime;
 
+/* Transitional registration for callers that still own a bare registry. */
 sl_status sl_kernel32_register(sl_module_registry *registry);
+/* Preferred registration path for an owning loader/module space. */
+sl_status sl_kernel32_register_space(sl_module_space *space);
 /* Configure once during process setup, before publishing any guest thread. */
 sl_status sl_kernel32_set_command_line_utf8(const char *command_line);
 

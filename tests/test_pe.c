@@ -1,5 +1,6 @@
 #include "sadlayer/loader.h"
 #include "sadlayer/module.h"
+#include "sadlayer/module_space.h"
 #include "sadlayer/pe.h"
 
 #include <stdbool.h>
@@ -875,6 +876,388 @@ static bool test_registry_backed_iat_binding(void) {
     return true;
 }
 
+static bool test_owned_module_space_lifetime(void) {
+    uint8_t first_fixture[FIXTURE_SIZE];
+    uint8_t second_fixture[FIXTURE_SIZE];
+    sl_module_space *space = NULL;
+    const sl_loaded_module *first_module = NULL;
+    const sl_loaded_module *second_module = NULL;
+    char first_name[] = "Fixture.dll";
+
+    CHECK(sl_module_space_create(NULL) == SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_module_space_create(&space) == SL_OK);
+    CHECK(space != NULL);
+    CHECK(sl_module_space_owned_count(space) == 0U);
+    CHECK(sl_module_space_registry(space) != NULL);
+    CHECK(sl_module_space_registry(space)->count == 0U);
+
+    make_pe64_fixture(first_fixture);
+    make_pe64_fixture(second_fixture);
+    CHECK(sl_module_space_add_pe(
+              space, first_name,
+              (sl_byte_view){first_fixture, sizeof(first_fixture)},
+              &first_module) == SL_OK);
+    CHECK(first_module != NULL);
+    CHECK(first_module->kind == SL_MODULE_PE);
+    CHECK(first_module->image->file.data != first_fixture);
+    CHECK(first_module->mapped->storage == SL_IMAGE_STORAGE_VIRTUAL);
+    CHECK(first_module->mapped->load_base ==
+          (uint64_t)(uintptr_t)first_module->mapped->bytes);
+    CHECK(sl_module_space_owned_count(space) == 1U);
+    CHECK(sl_module_space_registry(space)->count == 1U);
+
+    first_name[0] = 'X';
+    memset(first_fixture, 0, sizeof(first_fixture));
+    CHECK(first_module->image->file.data[0] == 'M');
+    CHECK(first_module->mapped->bytes[0x1000U] == 0xabU);
+    CHECK(sl_module_registry_find(sl_module_space_registry(space),
+                                  "Fixture.dll") == first_module);
+    sl_module_symbol export_query = {
+        .module_name = "Fixture.dll",
+        .symbol_name = "UnityMain2",
+    };
+    sl_resolved_symbol exported;
+    CHECK(sl_module_registry_resolve_symbol(sl_module_space_registry(space),
+                                            &export_query, &exported) == SL_OK);
+    CHECK(exported.guest_address == first_module->mapped->load_base + 0x1050U);
+
+    CHECK(sl_module_space_add_pe(
+              space, "Second.dll",
+              (sl_byte_view){second_fixture, sizeof(second_fixture)},
+              &second_module) == SL_OK);
+    CHECK(second_module != NULL);
+    CHECK(second_module->mapped->load_base != first_module->mapped->load_base);
+    CHECK(get_u64(second_module->mapped->bytes, 0x1010U) ==
+          second_module->mapped->load_base + UINT64_C(0x1234));
+    CHECK(sl_module_space_owned_count(space) == 2U);
+    CHECK(sl_module_space_registry(space)->count == 2U);
+
+    const sl_loaded_module *duplicate =
+        (const sl_loaded_module *)(uintptr_t)1U;
+    put_u32(second_fixture, 0x130U, 0U);
+    put_u32(second_fixture, 0x134U, 0U);
+    CHECK(sl_module_space_add_pe(
+              space, "fixture.DLL",
+              (sl_byte_view){second_fixture, sizeof(second_fixture)},
+              &duplicate) == SL_ERROR_DUPLICATE_MODULE);
+    CHECK(duplicate == NULL);
+    CHECK(sl_module_space_owned_count(space) == 2U);
+    CHECK(sl_module_space_registry(space)->count == 2U);
+
+    sl_module_space_destroy(space);
+    sl_module_space_destroy(NULL);
+    CHECK(sl_module_space_registry(NULL) == NULL);
+    CHECK(sl_module_space_owned_count(NULL) == 0U);
+    return true;
+}
+
+static bool test_module_space_add_rollback(void) {
+    uint8_t fixture[FIXTURE_SIZE];
+    sl_module_space *space = NULL;
+    const sl_loaded_module *module =
+        (const sl_loaded_module *)(uintptr_t)1U;
+    CHECK(sl_module_space_create(&space) == SL_OK);
+
+    make_pe64_fixture(fixture);
+    fixture[0] = 'N';
+    CHECK(sl_module_space_add_pe(
+              space, "Broken.dll",
+              (sl_byte_view){fixture, sizeof(fixture)},
+              &module) == SL_ERROR_BAD_DOS_SIGNATURE);
+    CHECK(module == NULL);
+    CHECK(sl_module_space_owned_count(space) == 0U);
+    CHECK(sl_module_space_registry(space)->count == 0U);
+
+    make_pe64_fixture(fixture);
+    CHECK(sl_module_space_add_pe(
+              space, "Primary.dll",
+              (sl_byte_view){fixture, sizeof(fixture)}, &module) == SL_OK);
+    CHECK(module != NULL);
+    CHECK(sl_module_space_owned_count(space) == 1U);
+
+    make_pe64_fixture(fixture);
+    put_u32(fixture, 0x130U, 0U);
+    put_u32(fixture, 0x134U, 0U);
+    CHECK(sl_module_space_add_pe(
+              space, "NoRelocations.dll",
+              (sl_byte_view){fixture, sizeof(fixture)},
+              &module) == SL_ERROR_RELOCATION_REQUIRED);
+    CHECK(module == NULL);
+    CHECK(sl_module_space_owned_count(space) == 1U);
+    CHECK(sl_module_space_registry(space)->count == 1U);
+    CHECK(sl_module_registry_find(sl_module_space_registry(space),
+                                  "NoRelocations.dll") == NULL);
+
+    make_pe64_fixture(fixture);
+    put_u16(fixture, 0x2d8U, 0xb010U);
+    CHECK(sl_module_space_add_pe(
+              space, "BadRelocation.dll",
+              (sl_byte_view){fixture, sizeof(fixture)},
+              &module) == SL_ERROR_UNSUPPORTED_RELOCATION);
+    CHECK(module == NULL);
+    CHECK(sl_module_space_owned_count(space) == 1U);
+    CHECK(sl_module_space_registry(space)->count == 1U);
+
+    make_pe32_fixture(fixture);
+    CHECK(sl_module_space_add_pe(
+              space, "Unsupported32.dll",
+              (sl_byte_view){fixture, sizeof(fixture)},
+              &module) == SL_ERROR_UNSUPPORTED_MACHINE);
+    CHECK(module == NULL);
+    CHECK(sl_module_space_owned_count(space) == 1U);
+    CHECK(sl_module_space_registry(space)->count == 1U);
+
+    CHECK(sl_module_space_add_pe(NULL, "Null.dll",
+                                 (sl_byte_view){fixture, sizeof(fixture)},
+                                 &module) == SL_ERROR_INVALID_ARGUMENT);
+    CHECK(module == NULL);
+    CHECK(sl_module_space_add_pe(space, "Empty.dll",
+                                 (sl_byte_view){NULL, 0U}, &module) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_module_space_owned_count(space) == 1U);
+
+    char overlong_name[SL_MODULE_NAME_CAPACITY + 1U];
+    memset(overlong_name, 'x', sizeof(overlong_name));
+    overlong_name[sizeof(overlong_name) - 1U] = '\0';
+    make_pe64_fixture(fixture);
+    CHECK(sl_module_space_add_pe(
+              space, overlong_name,
+              (sl_byte_view){fixture, sizeof(fixture)},
+              &module) == SL_ERROR_INVALID_ARGUMENT);
+    CHECK(module == NULL);
+    CHECK(sl_module_space_owned_count(space) == 1U);
+
+    CHECK(sl_module_space_add_pe(
+              space, "Recovered.dll",
+              (sl_byte_view){fixture, sizeof(fixture)}, NULL) == SL_OK);
+    CHECK(sl_module_space_owned_count(space) == 2U);
+    CHECK(sl_module_registry_find(sl_module_space_registry(space),
+                                  "Recovered.dll") != NULL);
+
+    sl_module_space_destroy(space);
+    return true;
+}
+
+static bool test_module_space_registry_capacity(void) {
+    static const sl_native_export host_export = {
+        .name = "Function",
+        .guest_address = UINT64_C(0x180001000),
+    };
+    uint8_t fixture[FIXTURE_SIZE];
+    sl_module_space *space = NULL;
+    CHECK(sl_module_space_create(&space) == SL_OK);
+
+    for (size_t index = 0U; index < SL_MODULE_REGISTRY_CAPACITY; ++index) {
+        char name[32];
+        int length = snprintf(name, sizeof(name), "Native%zu.dll", index);
+        CHECK(length > 0 && (size_t)length < sizeof(name));
+        CHECK(sl_module_space_add_native(space, name, &host_export, 1U,
+                                         NULL) == SL_OK);
+    }
+    CHECK(sl_module_space_registry(space)->count ==
+          SL_MODULE_REGISTRY_CAPACITY);
+    CHECK(sl_module_space_owned_count(space) == 0U);
+
+    make_pe64_fixture(fixture);
+    const sl_loaded_module *module =
+        (const sl_loaded_module *)(uintptr_t)1U;
+    CHECK(sl_module_space_add_pe(
+              space, "Overflow.dll",
+              (sl_byte_view){fixture, sizeof(fixture)},
+              &module) == SL_ERROR_MODULE_REGISTRY_FULL);
+    CHECK(module == NULL);
+    CHECK(sl_module_space_owned_count(space) == 0U);
+    CHECK(sl_module_space_registry(space)->count ==
+          SL_MODULE_REGISTRY_CAPACITY);
+
+    sl_module_space_destroy(space);
+    return true;
+}
+
+static bool test_module_space_owned_capacity(void) {
+    uint8_t fixture[FIXTURE_SIZE];
+    sl_module_space *space = NULL;
+    const sl_loaded_module *first = NULL;
+    make_pe64_fixture(fixture);
+    CHECK(sl_module_space_create(&space) == SL_OK);
+
+    for (size_t index = 0U; index < SL_MODULE_REGISTRY_CAPACITY; ++index) {
+        char name[32];
+        int length = snprintf(name, sizeof(name), "Owned%zu.dll", index);
+        CHECK(length > 0 && (size_t)length < sizeof(name));
+        const sl_loaded_module *module = NULL;
+        CHECK(sl_module_space_add_pe(
+                  space, name, (sl_byte_view){fixture, sizeof(fixture)},
+                  &module) == SL_OK);
+        CHECK(module != NULL && module->kind == SL_MODULE_PE);
+        if (index == 0U) {
+            first = module;
+        }
+    }
+    CHECK(sl_module_space_owned_count(space) ==
+          SL_MODULE_REGISTRY_CAPACITY);
+    CHECK(sl_module_space_registry(space)->count ==
+          SL_MODULE_REGISTRY_CAPACITY);
+    CHECK(sl_module_registry_find(sl_module_space_registry(space),
+                                  "owned0.DLL") == first);
+
+    const sl_loaded_module *overflow =
+        (const sl_loaded_module *)(uintptr_t)1U;
+    CHECK(sl_module_space_add_pe(
+              space, "OwnedOverflow.dll",
+              (sl_byte_view){fixture, sizeof(fixture)},
+              &overflow) == SL_ERROR_MODULE_REGISTRY_FULL);
+    CHECK(overflow == NULL);
+    CHECK(sl_module_space_owned_count(space) ==
+          SL_MODULE_REGISTRY_CAPACITY);
+
+    sl_module_space_destroy(space);
+    return true;
+}
+
+static bool test_module_space_maps_fixed_image_without_relocations(void) {
+    uint8_t fixture[FIXTURE_SIZE];
+    sl_module_space *probe_space = NULL;
+    sl_module_space *fixed_space = NULL;
+    const sl_loaded_module *probe = NULL;
+    make_pe64_fixture(fixture);
+    CHECK(sl_module_space_create(&probe_space) == SL_OK);
+    CHECK(sl_module_space_add_pe(
+              probe_space, "Probe.dll",
+              (sl_byte_view){fixture, sizeof(fixture)}, &probe) == SL_OK);
+    uint64_t reusable_base = probe->mapped->load_base;
+    CHECK(reusable_base != 0U);
+    /* Allocate the next owner before releasing the address it must reuse. */
+    CHECK(sl_module_space_create(&fixed_space) == SL_OK);
+    sl_module_space_destroy(probe_space);
+
+    put_u64(fixture, 0xb0U, reusable_base);
+    put_u64(fixture, 0x210U, reusable_base + UINT64_C(0x1234));
+    put_u32(fixture, 0x130U, 0U);
+    put_u32(fixture, 0x134U, 0U);
+    const sl_loaded_module *fixed = NULL;
+    CHECK(sl_module_space_add_pe(
+              fixed_space, "Fixed.dll",
+              (sl_byte_view){fixture, sizeof(fixture)}, &fixed) == SL_OK);
+    CHECK(fixed != NULL);
+    CHECK(fixed->mapped->preferred_base == reusable_base);
+    CHECK(fixed->mapped->load_base == reusable_base);
+    CHECK(fixed->mapped->bytes == (uint8_t *)(uintptr_t)reusable_base);
+
+    sl_module_space_destroy(fixed_space);
+    return true;
+}
+
+static bool test_module_space_binding_phases(void) {
+    static const sl_native_export host_exports[] = {
+        {.name = "ExitProcess",
+         .guest_address = UINT64_C(0x180001000)},
+        {.ordinal = 0x42U,
+         .has_ordinal = true,
+         .guest_address = UINT64_C(0x180002000)},
+    };
+    uint8_t fixture[FIXTURE_SIZE];
+    sl_module_space *space = NULL;
+    const sl_loaded_module *host = NULL;
+    const sl_loaded_module *program = NULL;
+    size_t bound_count = 99U;
+
+    CHECK(sl_module_space_create(&space) == SL_OK);
+    make_pe64_fixture(fixture);
+    CHECK(sl_module_space_add_pe(
+              space, "Program.exe",
+              (sl_byte_view){fixture, sizeof(fixture)}, &program) == SL_OK);
+    CHECK(program != NULL && program->kind == SL_MODULE_PE);
+    CHECK(sl_module_space_owned_count(space) == 1U);
+    CHECK(sl_module_space_finalize(space, program) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(!program->mapped->protections_finalized);
+    uint64_t original_named_iat = get_u64(program->mapped->bytes, 0x1090U);
+    uint64_t original_ordinal_iat = get_u64(program->mapped->bytes, 0x1098U);
+    CHECK(sl_module_space_bind_imports(space, program, &bound_count) ==
+          SL_ERROR_MODULE_NOT_FOUND);
+    CHECK(bound_count == 0U);
+    CHECK(get_u64(program->mapped->bytes, 0x1090U) == original_named_iat);
+    CHECK(get_u64(program->mapped->bytes, 0x1098U) == original_ordinal_iat);
+    CHECK(sl_module_space_finalize(space, program) ==
+          SL_ERROR_INVALID_STATE);
+
+    CHECK(sl_module_space_add_native(
+              space, "KernelHost.dll", host_exports,
+              sizeof(host_exports) / sizeof(host_exports[0]), &host) == SL_OK);
+    CHECK(host != NULL && host->kind == SL_MODULE_NATIVE);
+    CHECK(sl_module_space_add_alias(space, "KERNEL32.dll",
+                                    "KernelHost.dll") == SL_OK);
+    CHECK(sl_module_space_registry(space)->count == 2U);
+    CHECK(sl_module_space_registry(space)->alias_count == 1U);
+    const sl_loaded_module *alias_collision =
+        (const sl_loaded_module *)(uintptr_t)1U;
+    CHECK(sl_module_space_add_pe(
+              space, "kernel32.DLL",
+              (sl_byte_view){fixture, sizeof(fixture)},
+              &alias_collision) == SL_ERROR_DUPLICATE_MODULE);
+    CHECK(alias_collision == NULL);
+    CHECK(sl_module_space_owned_count(space) == 1U);
+
+    CHECK(sl_module_space_bind_imports(space, program, &bound_count) == SL_OK);
+    CHECK(bound_count == 2U);
+    CHECK(get_u64(program->mapped->bytes, 0x1090U) ==
+          UINT64_C(0x180001000));
+    CHECK(get_u64(program->mapped->bytes, 0x1098U) ==
+          UINT64_C(0x180002000));
+    CHECK(sl_module_space_finalize(space, program) == SL_OK);
+    CHECK(program->mapped->protections_finalized);
+    CHECK(sl_module_space_finalize(space, program) == SL_OK);
+    bound_count = 99U;
+    CHECK(sl_module_space_bind_imports(space, program, &bound_count) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(bound_count == 0U);
+
+    sl_module_space *foreign_space = NULL;
+    CHECK(sl_module_space_create(&foreign_space) == SL_OK);
+    CHECK(sl_module_space_bind_imports(foreign_space, program,
+                                       &bound_count) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(sl_module_space_finalize(foreign_space, program) ==
+          SL_ERROR_INVALID_STATE);
+    sl_module_space_destroy(foreign_space);
+
+    sl_loaded_module copied_program = *program;
+    CHECK(sl_module_space_bind_imports(space, &copied_program,
+                                       &bound_count) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(sl_module_space_finalize(space, &copied_program) ==
+          SL_ERROR_INVALID_STATE);
+
+    bound_count = 99U;
+    CHECK(sl_module_space_bind_imports(space, host, &bound_count) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(bound_count == 0U);
+    CHECK(sl_module_space_finalize(space, host) == SL_ERROR_INVALID_STATE);
+    CHECK(sl_module_space_bind_imports(NULL, program, &bound_count) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_module_space_finalize(space, NULL) == SL_ERROR_INVALID_ARGUMENT);
+
+    make_pe64_fixture(fixture);
+    put_u32(fixture, 0x110U, 0U);
+    put_u32(fixture, 0x114U, 0U);
+    const sl_loaded_module *no_imports = NULL;
+    CHECK(sl_module_space_add_pe(
+              space, "NoImports.dll",
+              (sl_byte_view){fixture, sizeof(fixture)}, &no_imports) == SL_OK);
+    CHECK(sl_module_space_finalize(space, no_imports) ==
+          SL_ERROR_INVALID_STATE);
+    bound_count = 99U;
+    CHECK(sl_module_space_bind_imports(space, no_imports, &bound_count) ==
+          SL_OK);
+    CHECK(bound_count == 0U);
+    CHECK(sl_module_space_finalize(space, no_imports) == SL_OK);
+    CHECK(no_imports->mapped->protections_finalized);
+
+    sl_module_space_destroy(space);
+    return true;
+}
+
 static bool test_rejects_malformed_files(void) {
     uint8_t fixture[FIXTURE_SIZE];
     sl_pe_image image;
@@ -915,6 +1298,15 @@ int main(void) {
         {"resolve native modules", test_native_module_resolution},
         {"bind IAT atomically", test_atomic_iat_binding},
         {"bind IAT from module registry", test_registry_backed_iat_binding},
+        {"own module bytes and mappings", test_owned_module_space_lifetime},
+        {"roll back failed module additions", test_module_space_add_rollback},
+        {"enforce module-space registry capacity",
+         test_module_space_registry_capacity},
+        {"enforce owned module-space capacity",
+         test_module_space_owned_capacity},
+        {"map fixed image without relocations",
+         test_module_space_maps_fixed_image_without_relocations},
+        {"bind and finalize owned modules", test_module_space_binding_phases},
         {"reject malformed files", test_rejects_malformed_files},
     };
     size_t passed = 0U;

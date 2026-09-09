@@ -35,6 +35,15 @@ guest x86-64 entry point            NT/process object model
   bounded mixed PE/native forwarder chain. This provides the routing primitive
   for API Set contracts but does not read `ApiSetSchema`, select a host by
   version, or populate target-specific mappings.
+- `module_space`: is the first ownership layer above the registry. It copies
+  each explicitly supplied PE file, parses and maps it into stable per-entry
+  storage, and publishes the borrowed registry pointers only after the entire
+  addition succeeds. Callers receive a read-only registry view; native-module
+  and alias registration, PE import binding, and final protection changes go
+  through the owning space, which permits finalization only after a successful
+  binding pass. Destruction unmaps owned images in reverse order. It does not
+  yet search for dependencies, bind the graph as a transaction, run
+  TLS/`DllMain`, or unload individual modules.
 - `unicode`: validates and converts explicit-length UTF-8/UTF-16 buffers without
   using the incompatible Linux `wchar_t` representation.
 - `process`: owns stable per-guest process state: an OS-random pointer cookie,

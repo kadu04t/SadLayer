@@ -25,6 +25,10 @@ The bootstrap can already:
   per-page PE protections with a strict W^X check;
 - register mapped PE and native modules, copy explicit module aliases, and
   resolve imports and mixed forwarder chains through the aliased host module;
+- keep explicitly supplied PE files in an owning module space so their source
+  bytes, parsed metadata, and execution-intended mappings remain valid
+  together, with per-add rollback on parse, mapping, relocation, or registry
+  failure;
 - bind PE32/PE32+ import address tables without partial writes;
 - expose an initial 54-export `KERNEL32.dll` subset through x86-64 `ms_abi`
   thunks for last-error state, time/identity, heap, TLS, no-fiber FLS, critical
@@ -67,9 +71,10 @@ host-thread fallback only when no guest context is installed. Fiber switching
 and process-wide callback enumeration are still pending, so the FLS surface is
 classified as partial even though its symbols are available.
 
-Completing the launcher's KERNEL32 surface, recursive DLL loading, complete API
-Set contract mapping, PE TLS, and exception/unwind support are the next loader
-milestones. See
+Associating the owned module space with a guest process, completing the
+launcher's KERNEL32 surface, recursive DLL loading, complete API Set contract
+mapping, PE TLS, and exception/unwind support are the next loader milestones.
+See
 [ROADMAP.md](ROADMAP.md) for the ordered compatibility plan and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries.
 
