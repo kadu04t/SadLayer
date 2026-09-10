@@ -72,4 +72,8 @@ sl_status sl_runtime_run_trusted_worker(const sl_pe_image *image,
                                         sl_win32_process *process,
                                         sl_runtime_report *report);
 
+/* Runs the finalized main PE owned by process; no independent image is used. */
+sl_status sl_runtime_run_process_main(sl_win32_process *process,
+                                      sl_runtime_report *report);
+
 #endif

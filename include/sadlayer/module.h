@@ -25,7 +25,7 @@ typedef struct {
     uint64_t guest_address;
 } sl_native_export;
 
-typedef struct {
+typedef struct sl_loaded_module {
     char name[SL_MODULE_NAME_CAPACITY];
     sl_module_kind kind;
     const sl_pe_image *image;

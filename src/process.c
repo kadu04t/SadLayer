@@ -1,9 +1,13 @@
 #include "sadlayer/process.h"
 
+#include "sadlayer/module_space.h"
+#include "sadlayer/unicode.h"
+
 #include <errno.h>
 #include <limits.h>
 #include <stdalign.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -17,6 +21,10 @@
 struct sl_win32_process {
     atomic_uint active_references;
     uintptr_t pointer_cookie;
+    sl_module_space *module_space;
+    const sl_loaded_module *main_module;
+    uint16_t *main_image_path;
+    size_t main_image_path_length;
     _Alignas(16) uint8_t peb[SL_PEB_SIZE];
     _Alignas(16) uint8_t process_parameters[SL_PROCESS_PARAMETERS_SIZE];
 };
@@ -47,6 +55,12 @@ static void store_u32(uint8_t *destination, uint32_t value) {
 
 static void store_uintptr(uint8_t *destination, uintptr_t value) {
     memcpy(destination, &value, sizeof(value));
+}
+
+static uintptr_t load_uintptr(const uint8_t *source) {
+    uintptr_t value = 0U;
+    memcpy(&value, source, sizeof(value));
+    return value;
 }
 
 sl_status sl_win32_process_create(sl_win32_process **out_process) {
@@ -91,6 +105,9 @@ sl_status sl_win32_process_destroy(sl_win32_process *process) {
                              memory_order_acquire) != 0U) {
         return SL_ERROR_INVALID_STATE;
     }
+    sl_module_space_destroy(process->module_space);
+    free(process->main_image_path);
+    memset(process, 0, sizeof(*process));
     free(process);
     return SL_OK;
 }
@@ -126,8 +143,150 @@ sl_status sl_win32_process_set_image_base(sl_win32_process *process,
     if (process == NULL || image_base > UINTPTR_MAX) {
         return SL_ERROR_INVALID_ARGUMENT;
     }
+    if (process->module_space != NULL) {
+        if (process->main_module == NULL ||
+            image_base != process->main_module->mapped->load_base) {
+            return SL_ERROR_INVALID_STATE;
+        }
+    }
     store_uintptr(process->peb + SL_WIN32_PEB_IMAGE_BASE_OFFSET,
                   (uintptr_t)image_base);
+    return SL_OK;
+}
+
+static const sl_loaded_module *find_exact_module(
+    const sl_module_space *space, const sl_loaded_module *candidate) {
+    const sl_module_registry *registry = sl_module_space_registry(space);
+    if (registry == NULL || candidate == NULL) {
+        return NULL;
+    }
+    for (size_t index = 0U; index < registry->count; ++index) {
+        if (&registry->modules[index] == candidate) {
+            return candidate;
+        }
+    }
+    return NULL;
+}
+
+static bool module_space_is_finalized(const sl_module_space *space) {
+    const sl_module_registry *registry = sl_module_space_registry(space);
+    if (registry == NULL) {
+        return false;
+    }
+    for (size_t index = 0U; index < registry->count; ++index) {
+        const sl_loaded_module *module = &registry->modules[index];
+        if (module->kind != SL_MODULE_PE) {
+            continue;
+        }
+        if (module->image == NULL || module->mapped == NULL ||
+            module->mapped->bytes == NULL ||
+            module->mapped->storage != SL_IMAGE_STORAGE_VIRTUAL ||
+            !module->mapped->protections_finalized ||
+            module->mapped->size != module->image->image_size ||
+            module->mapped->load_base !=
+                (uint64_t)(uintptr_t)module->mapped->bytes) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static sl_status validate_image_path(const uint16_t *path,
+                                     size_t path_length) {
+    if (path == NULL || path_length == 0U ||
+        path_length > SL_WIN32_IMAGE_PATH_MAX_UNITS) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    for (size_t index = 0U; index < path_length; ++index) {
+        if (path[index] == 0U) {
+            return SL_ERROR_INVALID_ARGUMENT;
+        }
+    }
+    size_t utf8_length = 0U;
+    return sl_utf16_to_utf8(path, path_length, NULL, 0U, &utf8_length);
+}
+
+sl_status sl_win32_process_adopt_module_space(
+    sl_win32_process *process, sl_module_space **space_io,
+    const sl_loaded_module *main_module, const uint16_t *image_path,
+    size_t image_path_length) {
+    if (process == NULL || space_io == NULL || *space_io == NULL ||
+        main_module == NULL) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    if (process->module_space != NULL || process->main_module != NULL ||
+        process->main_image_path != NULL ||
+        load_uintptr(process->peb + SL_WIN32_PEB_IMAGE_BASE_OFFSET) != 0U ||
+        atomic_load_explicit(&process->active_references,
+                             memory_order_acquire) != 0U) {
+        return SL_ERROR_INVALID_STATE;
+    }
+
+    sl_module_space *space = *space_io;
+    const sl_loaded_module *registered =
+        find_exact_module(space, main_module);
+    if (registered == NULL || registered->kind != SL_MODULE_PE ||
+        !module_space_is_finalized(space)) {
+        return SL_ERROR_INVALID_STATE;
+    }
+    sl_status status = validate_image_path(image_path, image_path_length);
+    if (status != SL_OK) {
+        return status;
+    }
+    if (registered->mapped->load_base == 0U ||
+        registered->mapped->load_base > UINTPTR_MAX) {
+        return SL_ERROR_INVALID_STATE;
+    }
+
+    size_t allocation_units = image_path_length + 1U;
+    uint16_t *path_copy = calloc(allocation_units, sizeof(*path_copy));
+    if (path_copy == NULL) {
+        return SL_ERROR_OUT_OF_MEMORY;
+    }
+    memcpy(path_copy, image_path, image_path_length * sizeof(*path_copy));
+
+    if (atomic_load_explicit(&process->active_references,
+                             memory_order_acquire) != 0U) {
+        free(path_copy);
+        return SL_ERROR_INVALID_STATE;
+    }
+    process->module_space = space;
+    process->main_module = registered;
+    process->main_image_path = path_copy;
+    process->main_image_path_length = image_path_length;
+    store_uintptr(process->peb + SL_WIN32_PEB_IMAGE_BASE_OFFSET,
+                  (uintptr_t)registered->mapped->load_base);
+    *space_io = NULL;
+    return SL_OK;
+}
+
+const sl_module_space *sl_win32_process_module_space(
+    const sl_win32_process *process) {
+    return process == NULL ? NULL : process->module_space;
+}
+
+const sl_loaded_module *sl_win32_process_main_module(
+    const sl_win32_process *process) {
+    return process == NULL ? NULL : process->main_module;
+}
+
+sl_status sl_win32_process_main_image_path(
+    const sl_win32_process *process, const uint16_t **path,
+    size_t *path_length) {
+    if (path != NULL) {
+        *path = NULL;
+    }
+    if (path_length != NULL) {
+        *path_length = 0U;
+    }
+    if (process == NULL || path == NULL || path_length == NULL) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    if (process->main_image_path == NULL) {
+        return SL_ERROR_INVALID_STATE;
+    }
+    *path = process->main_image_path;
+    *path_length = process->main_image_path_length;
     return SL_OK;
 }
 

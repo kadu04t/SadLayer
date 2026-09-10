@@ -2,6 +2,7 @@
 #include "sadlayer/module.h"
 #include "sadlayer/module_space.h"
 #include "sadlayer/pe.h"
+#include "sadlayer/process.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -1258,6 +1259,309 @@ static bool test_module_space_binding_phases(void) {
     return true;
 }
 
+static bool add_finalized_fixture_pe(sl_module_space *space, const char *name,
+                                     uint8_t fixture[FIXTURE_SIZE],
+                                     const sl_loaded_module **module) {
+    size_t bound_count = 99U;
+    make_pe64_fixture(fixture);
+    put_u32(fixture, 0x110U, 0U);
+    put_u32(fixture, 0x114U, 0U);
+    return sl_module_space_add_pe(
+               space, name, (sl_byte_view){fixture, FIXTURE_SIZE}, module) ==
+               SL_OK &&
+           sl_module_space_bind_imports(space, *module, &bound_count) == SL_OK &&
+           bound_count == 0U &&
+           sl_module_space_finalize(space, *module) == SL_OK;
+}
+
+static bool address_is_mapped(uintptr_t address) {
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (maps == NULL) {
+        return false;
+    }
+    char line[256];
+    bool found = false;
+    while (fgets(line, sizeof(line), maps) != NULL) {
+        unsigned long start = 0UL;
+        unsigned long end = 0UL;
+        if (sscanf(line, "%lx-%lx", &start, &end) == 2 &&
+            address >= (uintptr_t)start && address < (uintptr_t)end) {
+            found = true;
+            break;
+        }
+    }
+    (void)fclose(maps);
+    return found;
+}
+
+static bool test_process_adopts_module_space(void) {
+    uint8_t fixture[FIXTURE_SIZE];
+    uint16_t path[] = {
+        'C', ':', '\\', 'G', 'a', 'm', 'e', 's', '\\',
+        0xd83dU, 0xdc1bU, '\\', 'h', 'o', 'l', 'l', 'o', 'w', '_',
+        'k', 'n', 'i', 'g', 'h', 't', '.', 'e', 'x', 'e',
+    };
+    const size_t path_length = sizeof(path) / sizeof(path[0]);
+    sl_win32_process *process = NULL;
+    sl_module_space *space = NULL;
+    const sl_loaded_module *main_module = NULL;
+
+    CHECK(sl_win32_process_create(&process) == SL_OK);
+    CHECK(sl_win32_process_module_space(process) == NULL);
+    CHECK(sl_win32_process_main_module(process) == NULL);
+    CHECK(sl_module_space_create(&space) == SL_OK);
+    CHECK(add_finalized_fixture_pe(space, "hollow_knight.exe", fixture,
+                                   &main_module));
+    CHECK(main_module != NULL && main_module->mapped->protections_finalized);
+    const sl_module_space *adopted_space = space;
+    const uint8_t *mapped_address = main_module->mapped->bytes;
+    uintptr_t mapped_value = (uintptr_t)mapped_address;
+    uint64_t load_base = main_module->mapped->load_base;
+    CHECK(address_is_mapped(mapped_value));
+
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &space, main_module, path, path_length) == SL_OK);
+    CHECK(space == NULL);
+    CHECK(sl_win32_process_module_space(process) == adopted_space);
+    CHECK(sl_win32_process_main_module(process) == main_module);
+    CHECK(get_u64(sl_win32_process_peb(process),
+                  SL_WIN32_PEB_IMAGE_BASE_OFFSET) == load_base);
+
+    const uint16_t *stored_path = NULL;
+    size_t stored_length = 0U;
+    CHECK(sl_win32_process_main_image_path(process, &stored_path,
+                                           &stored_length) == SL_OK);
+    CHECK(stored_path != NULL && stored_path != path);
+    CHECK(stored_length == path_length);
+    CHECK(memcmp(stored_path, path, sizeof(path)) == 0);
+    CHECK(stored_path[stored_length] == 0U);
+    CHECK(sl_win32_process_main_image_path(process, NULL, &stored_length) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(stored_length == 0U);
+    stored_path = (const uint16_t *)(uintptr_t)1U;
+    CHECK(sl_win32_process_main_image_path(process, &stored_path, NULL) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(stored_path == NULL);
+    CHECK(sl_win32_process_main_image_path(process, &stored_path,
+                                           &stored_length) == SL_OK);
+    path[0] = 'X';
+    memset(fixture, 0, sizeof(fixture));
+    CHECK(stored_path[0] == 'C');
+    CHECK(main_module->image->file.data[0] == 'M');
+
+    CHECK(sl_win32_process_retain(process) == SL_OK);
+    CHECK(sl_win32_process_destroy(process) == SL_ERROR_INVALID_STATE);
+    CHECK(sl_win32_process_module_space(process) == adopted_space);
+    CHECK(sl_win32_process_main_module(process) == main_module);
+    CHECK(main_module->mapped->bytes == mapped_address);
+    CHECK(address_is_mapped(mapped_value));
+    sl_win32_process_release(process);
+
+    CHECK(sl_win32_process_destroy(process) == SL_OK);
+    CHECK(!address_is_mapped(mapped_value));
+    CHECK(sl_win32_process_module_space(NULL) == NULL);
+    CHECK(sl_win32_process_main_module(NULL) == NULL);
+    return true;
+}
+
+static bool test_process_module_adoption_rollback(void) {
+    static const sl_native_export native_export = {
+        .name = "Function",
+        .guest_address = UINT64_C(0x180001000),
+    };
+    static const uint16_t valid_path[] = {
+        'C', ':', '\\', 'h', 'o', 'l', 'l', 'o', 'w', '.', 'e', 'x', 'e',
+    };
+    static const uint16_t embedded_nul[] = {'a', 0U, 'b'};
+    static const uint16_t invalid_utf16[] = {0xd800U};
+    uint16_t maximum_path[32767U];
+    for (size_t index = 0U;
+         index < sizeof(maximum_path) / sizeof(maximum_path[0]); ++index) {
+        maximum_path[index] = 'x';
+    }
+
+    uint8_t fixture[FIXTURE_SIZE];
+    uint8_t pending_fixture[FIXTURE_SIZE];
+    uint8_t foreign_fixture[FIXTURE_SIZE];
+    uint8_t unfinalized_fixture[FIXTURE_SIZE];
+    sl_win32_process *process = NULL;
+    sl_module_space *space = NULL;
+    sl_module_space *foreign_space = NULL;
+    sl_module_space *unfinalized_space = NULL;
+    const sl_loaded_module *main_module = NULL;
+    const sl_loaded_module *pending_module = NULL;
+    const sl_loaded_module *foreign_module = NULL;
+    const sl_loaded_module *unfinalized_module = NULL;
+    const sl_loaded_module *native_module = NULL;
+
+    CHECK(sl_win32_process_create(&process) == SL_OK);
+    CHECK(sl_module_space_create(&space) == SL_OK);
+    CHECK(add_finalized_fixture_pe(space, "Main.exe", fixture,
+                                   &main_module));
+    CHECK(sl_module_space_add_native(space, "Native.dll", &native_export, 1U,
+                                     &native_module) == SL_OK);
+    CHECK(sl_module_space_create(&foreign_space) == SL_OK);
+    CHECK(add_finalized_fixture_pe(foreign_space, "Foreign.exe",
+                                   foreign_fixture, &foreign_module));
+    CHECK(sl_module_space_create(&unfinalized_space) == SL_OK);
+    make_pe64_fixture(unfinalized_fixture);
+    put_u32(unfinalized_fixture, 0x110U, 0U);
+    put_u32(unfinalized_fixture, 0x114U, 0U);
+    CHECK(sl_module_space_add_pe(
+              unfinalized_space, "Unfinalized.exe",
+              (sl_byte_view){unfinalized_fixture,
+                             sizeof(unfinalized_fixture)},
+              &unfinalized_module) == SL_OK);
+
+    CHECK(sl_win32_process_set_image_base(process, UINT64_C(0x140000000)) ==
+          SL_OK);
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &space, main_module, valid_path,
+              sizeof(valid_path) / sizeof(valid_path[0])) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(space != NULL);
+    CHECK(get_u64(sl_win32_process_peb(process),
+                  SL_WIN32_PEB_IMAGE_BASE_OFFSET) == UINT64_C(0x140000000));
+    CHECK(sl_win32_process_set_image_base(process, 0U) == SL_OK);
+
+    sl_module_space *null_space = NULL;
+    CHECK(sl_win32_process_adopt_module_space(
+              NULL, &space, main_module, valid_path,
+              sizeof(valid_path) / sizeof(valid_path[0])) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_win32_process_adopt_module_space(
+              process, NULL, main_module, valid_path,
+              sizeof(valid_path) / sizeof(valid_path[0])) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &null_space, main_module, valid_path,
+              sizeof(valid_path) / sizeof(valid_path[0])) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(null_space == NULL && space != NULL);
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &space, NULL, valid_path,
+              sizeof(valid_path) / sizeof(valid_path[0])) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(space != NULL);
+
+    sl_loaded_module copied_main = *main_module;
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &space, foreign_module, valid_path,
+              sizeof(valid_path) / sizeof(valid_path[0])) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(space != NULL);
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &space, &copied_main, valid_path,
+              sizeof(valid_path) / sizeof(valid_path[0])) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(space != NULL);
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &space, native_module, valid_path,
+              sizeof(valid_path) / sizeof(valid_path[0])) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(space != NULL);
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &unfinalized_space, unfinalized_module, valid_path,
+              sizeof(valid_path) / sizeof(valid_path[0])) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(unfinalized_space != NULL);
+
+    CHECK(sl_win32_process_adopt_module_space(process, &space, main_module,
+                                              valid_path, 0U) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(space != NULL);
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &space, main_module, NULL,
+              sizeof(valid_path) / sizeof(valid_path[0])) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(space != NULL);
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &space, main_module, embedded_nul,
+              sizeof(embedded_nul) / sizeof(embedded_nul[0])) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(space != NULL);
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &space, main_module, invalid_utf16,
+              sizeof(invalid_utf16) / sizeof(invalid_utf16[0])) ==
+          SL_ERROR_INVALID_ENCODING);
+    CHECK(space != NULL);
+
+    CHECK(sl_win32_process_retain(process) == SL_OK);
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &space, main_module, valid_path,
+              sizeof(valid_path) / sizeof(valid_path[0])) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(space != NULL);
+    sl_win32_process_release(process);
+
+    make_pe64_fixture(pending_fixture);
+    put_u32(pending_fixture, 0x110U, 0U);
+    put_u32(pending_fixture, 0x114U, 0U);
+    CHECK(sl_module_space_add_pe(
+              space, "Pending.dll",
+              (sl_byte_view){pending_fixture, sizeof(pending_fixture)},
+              &pending_module) == SL_OK);
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &space, main_module, valid_path,
+              sizeof(valid_path) / sizeof(valid_path[0])) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(space != NULL);
+    size_t bound_count = 99U;
+    CHECK(sl_module_space_bind_imports(space, pending_module, &bound_count) ==
+          SL_OK);
+    CHECK(bound_count == 0U);
+    CHECK(sl_module_space_finalize(space, pending_module) == SL_OK);
+
+    CHECK(sl_win32_process_module_space(process) == NULL);
+    CHECK(sl_win32_process_main_module(process) == NULL);
+    CHECK(get_u64(sl_win32_process_peb(process),
+                  SL_WIN32_PEB_IMAGE_BASE_OFFSET) == 0U);
+    const uint16_t *missing_path = (const uint16_t *)(uintptr_t)1U;
+    size_t missing_length = 99U;
+    CHECK(sl_win32_process_main_image_path(process, &missing_path,
+                                           &missing_length) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(missing_path == NULL && missing_length == 0U);
+
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &space, main_module, maximum_path,
+              sizeof(maximum_path) / sizeof(maximum_path[0])) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(space != NULL);
+    const sl_module_space *adopted_space = space;
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &space, main_module, maximum_path, 32766U) == SL_OK);
+    CHECK(space == NULL);
+    CHECK(sl_win32_process_module_space(process) == adopted_space);
+    CHECK(sl_win32_process_set_image_base(
+              process, main_module->mapped->load_base + 1U) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(sl_win32_process_set_image_base(
+              process, main_module->mapped->load_base) == SL_OK);
+
+    const uint16_t *stored_path = NULL;
+    size_t stored_length = 0U;
+    CHECK(sl_win32_process_main_image_path(process, &stored_path,
+                                           &stored_length) == SL_OK);
+    CHECK(stored_length == 32766U);
+    CHECK(memcmp(stored_path, maximum_path,
+                 stored_length * sizeof(*stored_path)) == 0);
+    CHECK(stored_path[stored_length] == 0U);
+
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &foreign_space, foreign_module, valid_path,
+              sizeof(valid_path) / sizeof(valid_path[0])) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(foreign_space != NULL);
+    CHECK(sl_win32_process_module_space(process) == adopted_space);
+    CHECK(sl_win32_process_main_module(process) == main_module);
+
+    sl_module_space_destroy(unfinalized_space);
+    sl_module_space_destroy(foreign_space);
+    CHECK(sl_win32_process_destroy(process) == SL_OK);
+    return true;
+}
+
 static bool test_rejects_malformed_files(void) {
     uint8_t fixture[FIXTURE_SIZE];
     sl_pe_image image;
@@ -1307,6 +1611,9 @@ int main(void) {
         {"map fixed image without relocations",
          test_module_space_maps_fixed_image_without_relocations},
         {"bind and finalize owned modules", test_module_space_binding_phases},
+        {"adopt process module space", test_process_adopts_module_space},
+        {"roll back process module adoption",
+         test_process_module_adoption_rollback},
         {"reject malformed files", test_rejects_malformed_files},
     };
     size_t passed = 0U;

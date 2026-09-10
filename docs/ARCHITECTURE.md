@@ -43,12 +43,21 @@ guest x86-64 entry point            NT/process object model
   through the owning space, which permits finalization only after a successful
   binding pass. Destruction unmaps owned images in reverse order. It does not
   yet search for dependencies, bind the graph as a transaction, run
-  TLS/`DllMain`, or unload individual modules.
+  TLS/`DllMain`, or unload individual modules. A process may adopt exactly one
+  fully bound and finalized space; after that transfer, external code receives
+  only an immutable view and process destruction owns its cleanup.
 - `unicode`: validates and converts explicit-length UTF-8/UTF-16 buffers without
   using the incompatible Linux `wchar_t` representation.
 - `process`: owns stable per-guest process state: an OS-random pointer cookie,
-  minimal PEB, and normalized process-parameters storage. Handles, address-space
-  ownership, and loader state will move behind the same lifecycle.
+  minimal PEB, and normalized process-parameters storage. Before any thread or
+  worker retains it, a one-shot operation can transfer in one finalized module
+  space, designate its exact main PE, and copy a validated UTF-16 image path
+  supplied with an explicit length into process-owned terminated storage. The
+  same operation writes the main mapping base to `PEB.ImageBaseAddress`; later
+  manual image-base changes cannot contradict the adopted main module.
+  Module-space, main-module, and path getters are borrowed read-only views valid
+  for the retained process lifetime. General handles and recursive loader state
+  remain future work.
 - `context`: installs a nestable thread-local view of the active Windows thread
   and process object; last-error, thread identity, TLS/FLS values, and pointer
   encoding already use it. An atomic ownership token prevents one guest context
@@ -78,7 +87,10 @@ guest x86-64 entry point            NT/process object model
   temporarily limited to eight bits; unhandled signals become `SIGNALLED`
   outcomes through the same wait path. The CLI does not expose either handoff to
   arbitrary PE input. Normal completion blocks signals before disarming crash
-  reporting and publishing its single wire record.
+  reporting and publishing its single wire record. The higher-level
+  `sl_runtime_run_process_main` path derives both image descriptors from the
+  process-owned main module, while legacy entry points reject an unrelated
+  image once a process has adopted its module space.
 
 Public headers live under `include/sadlayer`; implementations live under `src`.
 Tests construct redistributable PE-shaped fixtures in memory.

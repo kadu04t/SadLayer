@@ -2,6 +2,7 @@
 
 #include "sadlayer/runtime.h"
 
+#include "sadlayer/module.h"
 #include "sadlayer/teb.h"
 #include "sadlayer/win32.h"
 
@@ -173,6 +174,12 @@ sl_status sl_runtime_call_trusted_entry(const sl_pe_image *image,
     }
     if (thread == NULL || result == NULL || thread->process == NULL ||
         validate_trusted_entry(image, mapped) != SL_OK) {
+        return SL_ERROR_INVALID_STATE;
+    }
+    const sl_loaded_module *main_module =
+        sl_win32_process_main_module(thread->process);
+    if (main_module != NULL &&
+        (main_module->image != image || main_module->mapped != mapped)) {
         return SL_ERROR_INVALID_STATE;
     }
 
@@ -717,6 +724,12 @@ sl_status sl_runtime_run_trusted_worker(const sl_pe_image *image,
     if (process == NULL || sl_win32_context_current() != NULL) {
         return SL_ERROR_INVALID_STATE;
     }
+    const sl_loaded_module *main_module =
+        sl_win32_process_main_module(process);
+    if (main_module != NULL &&
+        (main_module->image != image || main_module->mapped != mapped)) {
+        return SL_ERROR_INVALID_STATE;
+    }
     sl_status status = validate_trusted_entry(image, mapped);
     if (status != SL_OK) {
         return status;
@@ -834,4 +847,20 @@ sl_status sl_runtime_run_trusted_worker(const sl_pe_image *image,
     }
     decode_wire_report(&wire, report);
     return SL_OK;
+}
+
+sl_status sl_runtime_run_process_main(sl_win32_process *process,
+                                      sl_runtime_report *report) {
+    if (report == NULL) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    memset(report, 0, sizeof(*report));
+    const sl_loaded_module *main_module =
+        sl_win32_process_main_module(process);
+    if (main_module == NULL || main_module->image == NULL ||
+        main_module->mapped == NULL) {
+        return SL_ERROR_INVALID_STATE;
+    }
+    return sl_runtime_run_trusted_worker(main_module->image,
+                                         main_module->mapped, process, report);
 }

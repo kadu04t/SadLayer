@@ -29,6 +29,10 @@ The bootstrap can already:
   bytes, parsed metadata, and execution-intended mappings remain valid
   together, with per-add rollback on parse, mapping, relocation, or registry
   failure;
+- transfer one fully bound and finalized module space into a guest process in a
+  one-shot operation, retaining the exact main-module identity and a private
+  UTF-16 copy of its guest-visible path while keeping `PEB.ImageBaseAddress`
+  equal to the main mapping;
 - bind PE32/PE32+ import address tables without partial writes;
 - expose an initial 54-export `KERNEL32.dll` subset through x86-64 `ms_abi`
   thunks for last-error state, time/identity, heap, TLS, no-fiber FLS, critical
@@ -43,7 +47,8 @@ The bootstrap can already:
 - construct the measured PEB/process-parameters and guarded TEB memory layouts,
   sharing `TEB+0x68` with the KERNEL32 last-error thunk;
 - execute a trusted synthetic PE32+ entry point that calls native KERNEL32
-  functions through its bound IAT and returns normally to Linux;
+  functions through its bound IAT and returns normally to Linux, including a
+  process-main entry that cannot be substituted with an unrelated image;
 - run the GS-aware synthetic entry point in an isolated copy-on-write process
   on a 1 MiB stack between guard pages, install and restore the TEB through GS,
   normalize inherited signal state, observe `ExitProcess`/`TerminateProcess`,
@@ -71,9 +76,12 @@ host-thread fallback only when no guest context is installed. Fiber switching
 and process-wide callback enumeration are still pending, so the FLS surface is
 classified as partial even though its symbols are available.
 
-Associating the owned module space with a guest process, completing the
-launcher's KERNEL32 surface, recursive DLL loading, complete API Set contract
-mapping, PE TLS, and exception/unwind support are the next loader milestones.
+The adopted module space and main-module/path views are exposed read-only for
+the process lifetime; process destruction releases the path and every owned PE
+mapping. Implementing the launcher's module-query APIs (`GetModuleHandleW`,
+`GetModuleHandleExW`, `GetModuleFileNameW`, `GetProcAddress`, and
+`RtlPcToFileHeader`), recursive DLL loading, complete API Set contract mapping,
+PE TLS, and exception/unwind support are the next loader milestones.
 See
 [ROADMAP.md](ROADMAP.md) for the ordered compatibility plan and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries.

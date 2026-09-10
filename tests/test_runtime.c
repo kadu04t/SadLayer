@@ -3,6 +3,7 @@
 #include "sadlayer/kernel32.h"
 #include "sadlayer/loader.h"
 #include "sadlayer/module.h"
+#include "sadlayer/module_space.h"
 #include "sadlayer/pe.h"
 #include "sadlayer/process.h"
 #include "sadlayer/runtime.h"
@@ -614,6 +615,93 @@ static bool test_worker_validates_arguments_image_and_state(void) {
     return true;
 }
 
+static bool test_process_main_worker_and_legacy_identity(void) {
+    static const uint16_t image_path[] = {
+        'C', ':', '\\', 'G', 'a', 'm', 'e', 's', '\\', 'R', 'u', 'n',
+        't', 'i', 'm', 'e', '.', 'e', 'x', 'e',
+    };
+    uint8_t fixture[FIXTURE_SIZE];
+    uint8_t foreign_fixture[FIXTURE_SIZE];
+    sl_win32_process *process = NULL;
+    sl_win32_process *empty_process = NULL;
+    sl_module_space *space = NULL;
+    const sl_loaded_module *main_module = NULL;
+    sl_runtime_report report;
+
+    make_worker_runtime_fixture(fixture);
+    CHECK(sl_win32_process_create(&process) == SL_OK);
+    CHECK(sl_module_space_create(&space) == SL_OK);
+    CHECK(sl_module_space_add_pe(
+              space, "Runtime.exe",
+              (sl_byte_view){fixture, sizeof(fixture)}, &main_module) == SL_OK);
+    CHECK(sl_kernel32_register_space(space) == SL_OK);
+    size_t bound_count = 99U;
+    CHECK(sl_module_space_bind_imports(space, main_module, &bound_count) ==
+          SL_OK);
+    CHECK(bound_count == 2U);
+    CHECK(sl_module_space_finalize(space, main_module) == SL_OK);
+    CHECK(main_module->mapped->protections_finalized);
+    CHECK(sl_win32_process_adopt_module_space(
+              process, &space, main_module, image_path,
+              sizeof(image_path) / sizeof(image_path[0])) == SL_OK);
+    CHECK(space == NULL);
+    CHECK(sl_win32_process_main_module(process) == main_module);
+    CHECK(load_u64((const uint8_t *)sl_win32_process_peb(process) +
+                   SL_WIN32_PEB_IMAGE_BASE_OFFSET) ==
+          main_module->mapped->load_base);
+
+    CHECK(sl_runtime_run_process_main(process, NULL) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    memset(&report, 0xa5, sizeof(report));
+    CHECK(sl_runtime_run_process_main(NULL, &report) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(runtime_report_is_zero(&report));
+    CHECK(sl_win32_process_create(&empty_process) == SL_OK);
+    memset(&report, 0xa5, sizeof(report));
+    CHECK(sl_runtime_run_process_main(empty_process, &report) ==
+          SL_ERROR_INVALID_STATE);
+    CHECK(runtime_report_is_zero(&report));
+    CHECK(sl_win32_process_destroy(empty_process) == SL_OK);
+
+    CHECK(sl_runtime_run_process_main(process, &report) == SL_OK);
+    CHECK(report.outcome == SL_RUNTIME_OUTCOME_RETURNED);
+    CHECK(report.worker_status == SL_OK);
+    CHECK(report.return_value == FIXTURE_RESULT);
+    CHECK(report.last_error == FIXTURE_RESULT);
+    CHECK(crash_fields_are_zero(&report));
+    CHECK(report.worker_process_id != 0U);
+    CHECK(report.worker_process_id != (uint32_t)getpid());
+    CHECK(sl_win32_context_current() == NULL);
+    CHECK(load_u64((const uint8_t *)sl_win32_process_peb(process) +
+                   SL_WIN32_PEB_IMAGE_BASE_OFFSET) ==
+          main_module->mapped->load_base);
+
+    CHECK(sl_runtime_run_trusted_worker(main_module->image,
+                                        main_module->mapped, process,
+                                        &report) == SL_OK);
+    CHECK(report.outcome == SL_RUNTIME_OUTCOME_RETURNED);
+    CHECK(report.worker_status == SL_OK);
+    CHECK(report.return_value == FIXTURE_RESULT);
+
+    sl_pe_image foreign_image;
+    sl_mapped_image foreign_mapped = {0};
+    make_worker_runtime_fixture(foreign_fixture);
+    CHECK(prepare_runtime_image(foreign_fixture, &foreign_image,
+                                &foreign_mapped));
+    CHECK(rejected_worker_report_is_clean(&foreign_image, &foreign_mapped,
+                                          process,
+                                          SL_ERROR_INVALID_STATE));
+    sl_pe_image copied_image = *main_module->image;
+    sl_mapped_image copied_mapping = *main_module->mapped;
+    CHECK(rejected_worker_report_is_clean(&copied_image, &copied_mapping,
+                                          process,
+                                          SL_ERROR_INVALID_STATE));
+
+    sl_loader_unmap_image(&foreign_mapped);
+    CHECK(sl_win32_process_destroy(process) == SL_OK);
+    return true;
+}
+
 static bool test_guarded_worker_installs_teb_in_gs(void) {
     uint8_t fixture[FIXTURE_SIZE];
     sl_pe_image image;
@@ -962,6 +1050,8 @@ int main(void) {
          test_final_protections_and_handoff},
         {"worker validates arguments, image, and state",
          test_worker_validates_arguments_image_and_state},
+        {"process main worker and legacy identity",
+         test_process_main_worker_and_legacy_identity},
         {"guard-page fault is contained", test_guard_fault_is_contained},
         {"crash report survives destroyed guest stack",
          test_crash_report_survives_destroyed_guest_stack},

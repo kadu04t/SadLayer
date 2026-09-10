@@ -40,11 +40,21 @@ from a guarded alternate signal stack. One deliberately sets RSP to zero first,
 proving that the report survives destruction of the guest stack and that the
 parent remains usable.
 
+The synthetic process path can now adopt one completely bound and finalized
+module space, keep the exact main PE plus a private UTF-16 image-path copy, and
+derive `PEB.ImageBaseAddress` and worker execution from that same identity.
+Read-only getters expose those values without reopening loader mutation after
+publication. This closes an ownership and image-substitution gap, but it does
+not make the profiled game graph runnable.
+
 The execution mapper now reserves this launcher at `0x140000000` on the profiled
 host, applies its final page protections, and identifies the entry address as
 `0x140001264`. SadLayer still does not transfer control to it: the remaining
 launcher imports, recursive UnityPlayer dependency binding, initialization
 order, API Set routing, PE TLS, and exception/unwind support are explicit gates.
+The next launcher-specific step is the still-unimplemented module-query cluster:
+`GetModuleHandleW`, `GetModuleHandleExW`, `GetModuleFileNameW`,
+`GetProcAddress`, and `RtlPcToFileHeader`.
 
 ## Direct UnityPlayer modules
 

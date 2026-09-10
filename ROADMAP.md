@@ -52,6 +52,9 @@ Implement, in order:
 - [x] Owning module space for explicitly supplied PE files, keeping source
   bytes, parsed images, and execution-intended mappings stable with per-add
   rollback.
+- [x] One-shot process adoption of a fully bound and finalized module space,
+  with immutable main-module/path views, coherent `PEB.ImageBaseAddress`, and a
+  process-main worker entry that rejects unrelated image descriptors.
 - [ ] Recursive DLL discovery and delay imports.
 - [ ] API Set schema/policy and authoritative contract-to-host mappings.
 - [ ] PE TLS directory, callbacks, and per-module thread data.
@@ -66,7 +69,9 @@ alternate stack after the guest destroys RSP and hits a guard page. Arbitrary
 PE input remains disabled until the loader can bind the complete dependency
 graph and provide the remaining launcher runtime contracts. Module aliases are
 only the routing substrate, and the owned space does not discover or initialize
-dependencies yet; no Windows API Set schema or target mapping is claimed.
+dependencies yet; process adoption freezes one explicitly prepared space rather
+than loading a graph, and no Windows API Set schema or target mapping is
+claimed.
 
 ## Stage 2 — NT and kernel32 foundation
 
@@ -77,7 +82,8 @@ Implement the minimum coherent process model rather than isolated stubs:
   conversions, process strings, pointer encoding, basic locale
   classification/casing, standard streams, and process exit.
 - [x] Explicit guest process object with an OS-random pointer cookie and
-  reversible `EncodePointer`/`DecodePointer` behavior.
+  reversible `EncodePointer`/`DecodePointer` behavior; it can now take ownership
+  of one finalized module space, main module, and copied UTF-16 image path.
 - [x] Validated explicit-length UTF-8/UTF-16 conversion primitives.
 - [x] Nestable native thread context for last-error/thread identity and the
   future process object.
@@ -90,8 +96,10 @@ Implement the minimum coherent process model rather than isolated stubs:
 - [ ] Fiber contexts and process-wide FLS callback enumeration.
 - [ ] Current directory, Windows path normalization, virtual memory, files,
   directories, mappings, waits, synchronization objects, and threads.
-- [ ] Remaining launcher imports: dynamic module lookup, filesystem/search, and
-  x64 exception/unwind APIs.
+- [ ] Remaining launcher imports: first the module-query cluster
+  (`GetModuleHandleW`, `GetModuleHandleExW`, `GetModuleFileNameW`,
+  `GetProcAddress`, and `RtlPcToFileHeader`), then filesystem/search and the
+  remaining x64 exception/unwind APIs.
 - [ ] Registry overlay stored inside a SadLayer prefix.
 
 Exit gate: purpose-built PE conformance programs pass file, memory, threading,
