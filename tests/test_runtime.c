@@ -190,6 +190,35 @@ static void make_worker_runtime_fixture(uint8_t data[FIXTURE_SIZE]) {
     memcpy(data + 0x200U, entry_code, sizeof(entry_code));
 }
 
+static void add_module_query_exports(uint8_t data[FIXTURE_SIZE]) {
+    /* Export directory in the unused tail of the fixture's .idata section. */
+    put_u32(data, 0x108U, 0x2160U);
+    put_u32(data, 0x10cU, 0x00a0U);
+    put_u32(data, 0x56cU, 0x21ccU);
+    put_u32(data, 0x570U, 1U);
+    put_u32(data, 0x574U, 3U);
+    put_u32(data, 0x578U, 3U);
+    put_u32(data, 0x57cU, 0x2190U);
+    put_u32(data, 0x580U, 0x219cU);
+    put_u32(data, 0x584U, 0x21a8U);
+    put_u32(data, 0x590U, 0x1100U);
+    put_u32(data, 0x594U, 0x21d8U);
+    put_u32(data, 0x598U, 0x21eeU);
+    put_u32(data, 0x59cU, 0x21c4U);
+    put_u32(data, 0x5a0U, 0x21b0U);
+    put_u32(data, 0x5a4U, 0x21bcU);
+    put_u16(data, 0x5a8U, 2U);
+    put_u16(data, 0x5aaU, 0U);
+    put_u16(data, 0x5acU, 1U);
+    memcpy(data + 0x5b0U, "CaseName", sizeof("CaseName"));
+    memcpy(data + 0x5bcU, "Forward", sizeof("Forward"));
+    memcpy(data + 0x5c4U, "Broken", sizeof("Broken"));
+    memcpy(data + 0x5ccU, "Utility.dll", sizeof("Utility.dll"));
+    memcpy(data + 0x5d8U, "KERNEL32.GetLastError",
+           sizeof("KERNEL32.GetLastError"));
+    memcpy(data + 0x5eeU, "Missing.Target", sizeof("Missing.Target"));
+}
+
 static void make_guard_fault_fixture(uint8_t data[FIXTURE_SIZE]) {
     /* Read StackLimit through GS and deliberately touch its lower guard page. */
     static const uint8_t entry_code[] = {
@@ -722,6 +751,7 @@ static bool prepare_module_query_process(
     *result = (module_query_process){0};
     make_worker_runtime_fixture(fixture);
     make_worker_runtime_fixture(secondary_fixture);
+    add_module_query_exports(secondary_fixture);
     if (sl_win32_process_create(&process) != SL_OK ||
         sl_module_space_create(&space) != SL_OK ||
         sl_module_space_add_pe(
@@ -1005,6 +1035,222 @@ static bool test_module_queries_follow_process_context(void) {
     CHECK(sl_win32_context_current() == NULL);
     CHECK(sl_win32_process_destroy(second.process) == SL_OK);
     CHECK(sl_win32_process_destroy(first.process) == SL_OK);
+    return true;
+}
+
+static bool test_remaining_module_query_contracts(void) {
+    static const uint16_t image_path[] = {
+        'C', ':', '\\', 'G', 'a', 'm', 'e', 's', '\\', 'Q', 'u', 'e',
+        'r', 'y', '\\', 'Q', 'u', 'e', 'r', 'y', '.', 'e', 'x', 'e',
+    };
+    static const uint16_t missing_module[] = {
+        'm', 's', 'c', 'o', 'r', 'e', 'e', '.', 'd', 'l', 'l', 0U,
+    };
+    static const uint16_t utility_name[] = {
+        'u', 't', 'i', 'l', 'i', 't', 'y', 0U,
+    };
+    module_query_process query;
+    module_query_process foreign;
+    CHECK(prepare_module_query_process(
+        "Query.exe", "QueryAlias.dll", image_path,
+        sizeof(image_path) / sizeof(image_path[0]), &query));
+    CHECK(prepare_module_query_process(
+        "Foreign.exe", "ForeignAlias.dll", image_path,
+        sizeof(image_path) / sizeof(image_path[0]), &foreign));
+
+    void *main_handle =
+        (void *)(uintptr_t)query.main_module->mapped->load_base;
+    void *secondary_handle =
+        (void *)(uintptr_t)query.secondary_module->mapped->load_base;
+    void *foreign_secondary_handle =
+        (void *)(uintptr_t)foreign.secondary_module->mapped->load_base;
+    CHECK(foreign_secondary_handle != secondary_handle);
+    sl_win32_thread_context thread = {
+        .process = query.process,
+        .last_error = UINT32_C(0x10203040),
+    };
+    sl_win32_context_scope scope = {0};
+    CHECK(sl_win32_context_enter(&thread, &scope) == SL_OK);
+
+    void *module = (void *)(uintptr_t)1U;
+    CHECK(sl_kernel32_get_module_handle_ex_w(0U, missing_module, &module) ==
+          SL_WIN32_FALSE);
+    CHECK(module == NULL && sl_kernel32_get_last_error() == 126U);
+    module = (void *)(uintptr_t)1U;
+    CHECK(sl_kernel32_get_module_handle_ex_w(
+              UINT32_C(0x8), NULL, &module) == SL_WIN32_FALSE);
+    CHECK(module == NULL && sl_kernel32_get_last_error() == 87U);
+    module = (void *)(uintptr_t)1U;
+    CHECK(sl_kernel32_get_module_handle_ex_w(
+              SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_PIN |
+                  SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+              NULL, &module) == SL_WIN32_FALSE);
+    CHECK(module == NULL && sl_kernel32_get_last_error() == 87U);
+    CHECK(sl_kernel32_get_module_handle_ex_w(0U, NULL, NULL) ==
+          SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    module = (void *)(uintptr_t)1U;
+    CHECK(sl_kernel32_get_module_handle_ex_w(
+              SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, NULL,
+              &module) == SL_WIN32_FALSE);
+    CHECK(module == NULL && sl_kernel32_get_last_error() == 87U);
+
+    sl_kernel32_set_last_error(UINT32_C(0x11223344));
+    CHECK(sl_kernel32_get_module_handle_ex_w(0U, NULL, &module) ==
+          SL_WIN32_TRUE);
+    CHECK(module == main_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x11223344));
+    CHECK(sl_kernel32_get_module_handle_ex_w(
+              SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_PIN, utility_name,
+              &module) == SL_WIN32_TRUE);
+    CHECK(module == secondary_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x11223344));
+    CHECK(sl_kernel32_get_module_handle_ex_w(
+              SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+              utility_name, &module) == SL_WIN32_TRUE);
+    CHECK(module == secondary_handle);
+
+    uintptr_t secondary_address =
+        (uintptr_t)query.secondary_module->mapped->load_base + 0x1100U;
+    uintptr_t secondary_last =
+        (uintptr_t)query.secondary_module->mapped->load_base +
+        query.secondary_module->mapped->size - 1U;
+    CHECK(sl_kernel32_get_module_handle_ex_w(
+              SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+              (const uint16_t *)secondary_address, &module) ==
+          SL_WIN32_TRUE);
+    CHECK(module == secondary_handle);
+    CHECK(sl_kernel32_get_module_handle_ex_w(
+              SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                  SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+              (const uint16_t *)secondary_handle, &module) ==
+          SL_WIN32_TRUE);
+    CHECK(module == secondary_handle);
+    CHECK(sl_kernel32_get_module_handle_ex_w(
+              SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                  SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_PIN,
+              (const uint16_t *)secondary_last, &module) ==
+          SL_WIN32_TRUE);
+    CHECK(module == secondary_handle);
+    uintptr_t secondary_end =
+        (uintptr_t)query.secondary_module->mapped->load_base +
+        query.secondary_module->mapped->size;
+    module = (void *)(uintptr_t)1U;
+    CHECK(sl_kernel32_get_module_handle_ex_w(
+              SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+              (const uint16_t *)secondary_end, &module) ==
+          SL_WIN32_FALSE);
+    CHECK(module == NULL && sl_kernel32_get_last_error() == 126U);
+    uintptr_t foreign_address =
+        (uintptr_t)foreign.secondary_module->mapped->load_base + 0x1100U;
+    CHECK(sl_kernel32_get_module_handle_ex_w(
+              SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+              (const uint16_t *)foreign_address, &module) ==
+          SL_WIN32_FALSE);
+    CHECK(module == NULL && sl_kernel32_get_last_error() == 126U);
+
+    CHECK(sl_kernel32_get_proc_address(NULL, "CaseName") == NULL);
+    CHECK(sl_kernel32_get_last_error() == 127U);
+    sl_kernel32_set_last_error(UINT32_C(0x55667788));
+    void *procedure =
+        sl_kernel32_get_proc_address(secondary_handle, "CaseName");
+    CHECK(procedure ==
+          (void *)((uintptr_t)secondary_handle + (uintptr_t)0x1100U));
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x55667788));
+    CHECK(sl_kernel32_get_proc_address(
+              secondary_handle, (const char *)(uintptr_t)1U) == procedure);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x55667788));
+
+    const sl_module_registry *registry = sl_module_space_registry(
+        sl_win32_process_module_space(query.process));
+    sl_module_symbol expected_symbol = {
+        .module_name = "KERNEL32.dll",
+        .symbol_name = "GetLastError",
+        .ordinal = 0U,
+        .by_ordinal = false,
+    };
+    sl_resolved_symbol expected_forwarder;
+    CHECK(sl_module_registry_resolve_symbol(
+              registry, &expected_symbol, &expected_forwarder) == SL_OK);
+    CHECK(sl_kernel32_get_proc_address(
+              secondary_handle, (const char *)(uintptr_t)2U) ==
+          (void *)(uintptr_t)expected_forwarder.guest_address);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x55667788));
+    CHECK(sl_kernel32_get_proc_address(secondary_handle, "Forward") ==
+          (void *)(uintptr_t)expected_forwarder.guest_address);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x55667788));
+
+    CHECK(sl_kernel32_get_proc_address(secondary_handle, "Broken") == NULL);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+    CHECK(sl_kernel32_get_proc_address(secondary_handle, "casename") ==
+          NULL);
+    CHECK(sl_kernel32_get_last_error() == 127U);
+    CHECK(sl_kernel32_get_proc_address(secondary_handle, "Missing") == NULL);
+    CHECK(sl_kernel32_get_last_error() == 127U);
+    CHECK(sl_kernel32_get_proc_address(
+              (void *)((uintptr_t)secondary_handle + 1U), "CaseName") ==
+          NULL);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+    CHECK(sl_kernel32_get_proc_address(secondary_handle, NULL) == NULL);
+    CHECK(sl_kernel32_get_last_error() == 182U);
+    CHECK(sl_kernel32_get_proc_address(
+              secondary_handle, (const char *)(uintptr_t)4U) == NULL);
+    CHECK(sl_kernel32_get_last_error() == 182U);
+    CHECK(sl_kernel32_get_proc_address(foreign_secondary_handle,
+                                       "CaseName") == NULL);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+
+    void *image_base = (void *)(uintptr_t)1U;
+    sl_kernel32_set_last_error(UINT32_C(0xaabbccdd));
+    CHECK(sl_kernel32_rtl_pc_to_file_header(
+              (const void *)secondary_address, &image_base) ==
+          secondary_handle);
+    CHECK(image_base == secondary_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0xaabbccdd));
+    CHECK(sl_kernel32_rtl_pc_to_file_header(secondary_handle, &image_base) ==
+          secondary_handle);
+    CHECK(image_base == secondary_handle);
+    uintptr_t main_last = (uintptr_t)main_handle +
+                          query.main_module->mapped->size - 1U;
+    CHECK(sl_kernel32_rtl_pc_to_file_header((const void *)main_last,
+                                            &image_base) == main_handle);
+    CHECK(image_base == main_handle);
+    image_base = (void *)(uintptr_t)1U;
+    CHECK(sl_kernel32_rtl_pc_to_file_header((const void *)secondary_end,
+                                            &image_base) == NULL);
+    CHECK(image_base == NULL);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0xaabbccdd));
+    image_base = (void *)(uintptr_t)1U;
+    CHECK(sl_kernel32_rtl_pc_to_file_header(NULL, &image_base) == NULL);
+    CHECK(image_base == NULL);
+    CHECK(sl_kernel32_rtl_pc_to_file_header(
+              (const void *)secondary_address, NULL) == NULL);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0xaabbccdd));
+    image_base = (void *)(uintptr_t)1U;
+    CHECK(sl_kernel32_rtl_pc_to_file_header(
+              (const void *)(uintptr_t)expected_forwarder.guest_address,
+              &image_base) == NULL);
+    CHECK(image_base == NULL);
+    image_base = (void *)(uintptr_t)1U;
+    CHECK(sl_kernel32_rtl_pc_to_file_header((const void *)foreign_address,
+                                            &image_base) == NULL);
+    CHECK(image_base == NULL);
+
+    CHECK(sl_win32_context_leave(&scope) == SL_OK);
+    module = (void *)(uintptr_t)1U;
+    CHECK(sl_kernel32_get_module_handle_ex_w(0U, NULL, &module) ==
+          SL_WIN32_FALSE);
+    CHECK(module == NULL && sl_kernel32_get_last_error() == 126U);
+    CHECK(sl_kernel32_get_proc_address(secondary_handle, "CaseName") == NULL);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+    image_base = (void *)(uintptr_t)1U;
+    sl_kernel32_set_last_error(UINT32_C(0xdeadbeef));
+    CHECK(sl_kernel32_rtl_pc_to_file_header(
+              (const void *)secondary_address, &image_base) == NULL);
+    CHECK(image_base == NULL);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0xdeadbeef));
+    CHECK(sl_win32_process_destroy(foreign.process) == SL_OK);
+    CHECK(sl_win32_process_destroy(query.process) == SL_OK);
     return true;
 }
 
@@ -1360,6 +1606,8 @@ int main(void) {
          test_process_main_worker_and_legacy_identity},
         {"module queries follow process context",
          test_module_queries_follow_process_context},
+        {"remaining module query contracts",
+         test_remaining_module_query_contracts},
         {"guard-page fault is contained", test_guard_fault_is_contained},
         {"crash report survives destroyed guest stack",
          test_crash_report_survives_destroyed_guest_stack},

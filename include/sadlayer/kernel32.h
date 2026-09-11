@@ -30,6 +30,9 @@
 #define SL_WIN32_LCMAP_LOWERCASE 0x00000100U
 #define SL_WIN32_LCMAP_UPPERCASE 0x00000200U
 #define SL_WIN32_LCMAP_LINGUISTIC_CASING 0x01000000U
+#define SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_PIN 0x00000001U
+#define SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT 0x00000002U
+#define SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS 0x00000004U
 
 typedef int32_t sl_win32_bool;
 
@@ -94,8 +97,14 @@ int32_t SL_WINAPI sl_kernel32_wide_char_to_multi_byte(
 char *SL_WINAPI sl_kernel32_get_command_line_a(void);
 uint16_t *SL_WINAPI sl_kernel32_get_command_line_w(void);
 void *SL_WINAPI sl_kernel32_get_module_handle_w(const uint16_t *module_name);
+sl_win32_bool SL_WINAPI sl_kernel32_get_module_handle_ex_w(
+    uint32_t flags, const uint16_t *module_name, void **module);
 uint32_t SL_WINAPI sl_kernel32_get_module_file_name_w(
     void *module, uint16_t *filename, uint32_t size);
+void *SL_WINAPI sl_kernel32_get_proc_address(void *module,
+                                             const char *procedure_name);
+void *SL_WINAPI sl_kernel32_rtl_pc_to_file_header(const void *program_counter,
+                                                   void **image_base);
 uint16_t *SL_WINAPI sl_kernel32_get_environment_strings_w(void);
 sl_win32_bool SL_WINAPI sl_kernel32_free_environment_strings_w(
     uint16_t *environment);

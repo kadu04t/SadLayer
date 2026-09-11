@@ -97,14 +97,17 @@ Implement the minimum coherent process model rather than isolated stubs:
   basenames, plus `GetModuleFileNameW` for the copied main-image path with
   modern null-terminated truncation behavior. Full-path lookup waits for
   per-DLL canonical paths.
+- [x] Process-local PE module-query cluster: `GetModuleHandleExW` with
+  resident-module flag semantics and address lookup, `GetProcAddress` by name
+  or ordinal with forwarder resolution, and `RtlPcToFileHeader` over mapped PE
+  ranges. Native built-ins intentionally remain outside the `HMODULE` model.
 - [ ] PE TLS directory/callbacks, validated guest pointers, and coherent
   handles/object lifetimes.
 - [ ] Fiber contexts and process-wide FLS callback enumeration.
 - [ ] Current directory, Windows path normalization, virtual memory, files,
   directories, mappings, waits, synchronization objects, and threads.
-- [ ] Remaining launcher imports: finish the module-query cluster
-  (`GetModuleHandleExW`, `GetProcAddress`, and `RtlPcToFileHeader`), then
-  filesystem/search and the remaining x64 exception/unwind APIs.
+- [ ] Remaining launcher imports: dynamic module loading, filesystem/search,
+  and the remaining x64 exception/unwind APIs.
 - [ ] Registry overlay stored inside a SadLayer prefix.
 
 Exit gate: purpose-built PE conformance programs pass file, memory, threading,

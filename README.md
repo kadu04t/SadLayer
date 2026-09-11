@@ -36,7 +36,7 @@ The bootstrap can already:
   UTF-16 copy of its guest-visible path while keeping `PEB.ImageBaseAddress`
   equal to the main mapping;
 - bind PE32/PE32+ import address tables without partial writes;
-- expose an initial 56-export `KERNEL32.dll` subset through x86-64 `ms_abi`
+- expose an initial 59-export `KERNEL32.dll` subset through x86-64 `ms_abi`
   thunks for last-error state, time/identity, heap, TLS, no-fiber FLS, critical
   sections, text conversion, process strings, locale basics, standard streams,
   pointer encoding, process-scoped PE module queries, and process termination;
@@ -80,14 +80,19 @@ classified as partial even though its symbols are available.
 
 The adopted module space and main-module/path views are exposed read-only for
 the process lifetime; process destruction releases the path and every owned PE
-mapping. `GetModuleHandleW` now returns exact mapped PE bases from the active
-guest process for the main image or a registered basename, and
-`GetModuleFileNameW` exposes that process's copied main-image path with modern
+mapping. The module-query thunks operate only through the active guest process.
+`GetModuleHandleW` and `GetModuleHandleExW` return exact mapped PE bases for the
+main image or a registered basename; address lookup uses PE image ranges, and
+the supported reference-count flags are currently no-ops because adopted
+modules remain resident for the process lifetime. `GetProcAddress` resolves PE
+exports by exact name or ordinal, treats a null handle as the main image, follows
+registry-backed forwarders, and
+`RtlPcToFileHeader` reports the PE mapping that owns an address.
+`GetModuleFileNameW` exposes the process's copied main-image path with modern
 null-terminated truncation behavior. Full-path module lookup, native built-in
-`HMODULE` values, and filename queries for non-main modules remain unsupported.
-`GetModuleHandleExW`, `GetProcAddress`, `RtlPcToFileHeader`,
-recursive DLL loading, complete API Set contract mapping, PE TLS, and
-exception/unwind support are the next loader milestones.
+`HMODULE` values, filename queries for non-main modules, recursive DLL loading,
+complete API Set contract mapping, PE TLS, and exception/unwind support remain
+future loader milestones.
 See
 [ROADMAP.md](ROADMAP.md) for the ordered compatibility plan and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries.

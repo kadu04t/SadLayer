@@ -29,6 +29,8 @@
 #define SL_ERROR_INVALID_PARAMETER 87U
 #define SL_ERROR_INSUFFICIENT_BUFFER 122U
 #define SL_ERROR_MOD_NOT_FOUND 126U
+#define SL_ERROR_PROC_NOT_FOUND 127U
+#define SL_ERROR_INVALID_ORDINAL 182U
 #define SL_ERROR_INVALID_FLAGS 1004U
 #define SL_ERROR_NO_UNICODE_TRANSLATION 1113U
 #define SL_HEAP_ZERO_MEMORY 0x00000008U
@@ -708,6 +710,12 @@ static const sl_loaded_module *current_pe_module_by_name(
     return module;
 }
 
+static const sl_module_registry *current_module_registry(void) {
+    const sl_win32_process *process = current_process_if_installed();
+    return sl_module_space_registry(
+        sl_win32_process_module_space(process));
+}
+
 void *SL_WINAPI sl_kernel32_get_module_handle_w(
     const uint16_t *module_name) {
     const sl_loaded_module *module = current_pe_module_by_name(module_name);
@@ -718,6 +726,58 @@ void *SL_WINAPI sl_kernel32_get_module_handle_w(
         return NULL;
     }
     return (void *)(uintptr_t)module->mapped->load_base;
+}
+
+sl_win32_bool SL_WINAPI sl_kernel32_get_module_handle_ex_w(
+    uint32_t flags, const uint16_t *module_name, void **module_handle) {
+    if (module_handle == NULL) {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
+        return SL_WIN32_FALSE;
+    }
+    *module_handle = NULL;
+
+    const uint32_t valid_flags =
+        SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_PIN |
+        SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT |
+        SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS;
+    if ((flags & ~valid_flags) != 0U ||
+        (flags & (SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_PIN |
+                  SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT)) ==
+            (SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_PIN |
+             SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT)) {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
+        return SL_WIN32_FALSE;
+    }
+
+    const sl_loaded_module *module = NULL;
+    if ((flags & SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS) != 0U) {
+        const sl_module_registry *registry = current_module_registry();
+        if (module_name == NULL) {
+            sl_last_error = SL_ERROR_INVALID_PARAMETER;
+            return SL_WIN32_FALSE;
+        }
+        if (registry == NULL ||
+            sl_module_registry_resolve_address(
+                registry, (uint64_t)(uintptr_t)module_name, &module) != SL_OK) {
+            sl_last_error = SL_ERROR_MOD_NOT_FOUND;
+            return SL_WIN32_FALSE;
+        }
+    } else {
+        module = current_pe_module_by_name(module_name);
+        if (module == NULL) {
+            sl_last_error = SL_ERROR_MOD_NOT_FOUND;
+            return SL_WIN32_FALSE;
+        }
+    }
+
+    /* Bootstrap modules already remain resident for the process lifetime. */
+    if (module->mapped == NULL || module->mapped->load_base == 0U ||
+        module->mapped->load_base > UINTPTR_MAX) {
+        sl_last_error = SL_ERROR_MOD_NOT_FOUND;
+        return SL_WIN32_FALSE;
+    }
+    *module_handle = (void *)(uintptr_t)module->mapped->load_base;
+    return SL_WIN32_TRUE;
 }
 
 uint32_t SL_WINAPI sl_kernel32_get_module_file_name_w(
@@ -770,6 +830,65 @@ uint32_t SL_WINAPI sl_kernel32_get_module_file_name_w(
     memcpy(filename, path, path_length * sizeof(*filename));
     filename[path_length] = 0U;
     return (uint32_t)path_length;
+}
+
+void *SL_WINAPI sl_kernel32_get_proc_address(
+    void *module_handle, const char *procedure_name) {
+    const sl_win32_process *process = current_process_if_installed();
+    const sl_module_registry *registry = sl_module_space_registry(
+        sl_win32_process_module_space(process));
+    const sl_loaded_module *module =
+        module_handle == NULL ? sl_win32_process_main_module(process) : NULL;
+    if (registry == NULL ||
+        (module == NULL &&
+         sl_module_registry_resolve_handle(
+             registry, (uint64_t)(uintptr_t)module_handle, &module) != SL_OK)) {
+        sl_last_error = SL_ERROR_MOD_NOT_FOUND;
+        return NULL;
+    }
+
+    uintptr_t procedure_value = (uintptr_t)procedure_name;
+    sl_module_symbol symbol = {
+        .module_name = module->name,
+        .symbol_name = procedure_value <= UINT16_MAX ? NULL : procedure_name,
+        .ordinal = procedure_value <= UINT16_MAX ? (uint32_t)procedure_value
+                                                  : 0U,
+        .by_ordinal = procedure_value <= UINT16_MAX,
+    };
+    sl_resolved_symbol resolved = {0};
+    sl_status status =
+        sl_module_registry_resolve_symbol(registry, &symbol, &resolved);
+    if (status != SL_OK || resolved.guest_address == 0U ||
+        resolved.guest_address > UINTPTR_MAX) {
+        if (status == SL_ERROR_MODULE_NOT_FOUND) {
+            sl_last_error = SL_ERROR_MOD_NOT_FOUND;
+        } else if (symbol.by_ordinal && status == SL_ERROR_EXPORT_NOT_FOUND) {
+            sl_last_error = SL_ERROR_INVALID_ORDINAL;
+        } else {
+            sl_last_error = SL_ERROR_PROC_NOT_FOUND;
+        }
+        return NULL;
+    }
+    return (void *)(uintptr_t)resolved.guest_address;
+}
+
+void *SL_WINAPI sl_kernel32_rtl_pc_to_file_header(
+    const void *program_counter, void **image_base) {
+    if (image_base == NULL) {
+        return NULL;
+    }
+    *image_base = NULL;
+    const sl_module_registry *registry = current_module_registry();
+    const sl_loaded_module *module = NULL;
+    if (registry == NULL || program_counter == NULL ||
+        sl_module_registry_resolve_address(
+            registry, (uint64_t)(uintptr_t)program_counter, &module) != SL_OK ||
+        module->mapped == NULL || module->mapped->load_base == 0U ||
+        module->mapped->load_base > UINTPTR_MAX) {
+        return NULL;
+    }
+    *image_base = (void *)(uintptr_t)module->mapped->load_base;
+    return *image_base;
 }
 
 static uint32_t SL_WINAPI sl_kernel32_get_acp(void) { return 1252U; }
@@ -1903,8 +2022,14 @@ static void initialize_kernel32_exports(void) {
                   sl_kernel32_get_command_line_w);
     SL_ADD_EXPORT(exports, export_count, "GetModuleHandleW",
                   sl_kernel32_get_module_handle_w);
+    SL_ADD_EXPORT(exports, export_count, "GetModuleHandleExW",
+                  sl_kernel32_get_module_handle_ex_w);
     SL_ADD_EXPORT(exports, export_count, "GetModuleFileNameW",
                   sl_kernel32_get_module_file_name_w);
+    SL_ADD_EXPORT(exports, export_count, "GetProcAddress",
+                  sl_kernel32_get_proc_address);
+    SL_ADD_EXPORT(exports, export_count, "RtlPcToFileHeader",
+                  sl_kernel32_rtl_pc_to_file_header);
     SL_ADD_EXPORT(exports, export_count, "GetEnvironmentStringsW",
                   sl_kernel32_get_environment_strings_w);
     SL_ADD_EXPORT(exports, export_count, "FreeEnvironmentStringsW",

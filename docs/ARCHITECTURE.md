@@ -73,10 +73,17 @@ guest x86-64 entry point            NT/process object model
   worker installs the TEB base in GS only around guest execution and verifies
   restoration before releasing it.
 - `kernel32`: provides the first host-backed x86-64 `ms_abi` thunks. Current
-  coverage is a 56-export bootstrap subset backed by the minimal PEB/TEB
-  layouts. `GetModuleHandleW` resolves the main image or registered PE
-  basenames only inside the installed process context; path-bearing names are
-  rejected until the catalog owns canonical paths for every DLL.
+  coverage is a 59-export bootstrap subset backed by the minimal PEB/TEB
+  layouts. Module queries resolve only inside the installed process context.
+  `GetModuleHandleW` and `GetModuleHandleExW` expose the main image or
+  registered PE basenames; the latter can also identify a module by an address
+  in its half-open mapped range. Supported pin/reference-count flags are
+  observational no-ops while the adopted module space keeps every module
+  resident. `GetProcAddress` accepts exact export names or ordinals from a PE
+  `HMODULE`, treats a null handle as the main image, and follows registry-backed
+  forwarders. `RtlPcToFileHeader` maps a
+  program counter back to its owning PE image. Path-bearing names are rejected
+  until the catalog owns canonical paths for every DLL.
   `GetModuleFileNameW` returns the process-owned main-image path and implements
   modern null-terminated truncation. Native built-ins intentionally have no
   `HMODULE`, and the subset does not yet constitute a complete loader, object,
