@@ -1254,6 +1254,103 @@ static bool test_remaining_module_query_contracts(void) {
     return true;
 }
 
+static bool test_resident_dynamic_module_contracts(void) {
+    static const uint16_t image_path[] = {
+        'C', ':', '\\', 'G', 'a', 'm', 'e', 's', '\\', 'L', 'o', 'a',
+        'd', 'e', 'r', '\\', 'L', 'o', 'a', 'd', 'e', 'r', '.', 'e', 'x',
+        'e',
+    };
+    static const uint16_t utility_name[] = {
+        'u', 'T', 'i', 'L', 'i', 'T', 'y', 0U,
+    };
+    static const uint16_t utility_alias[] = {
+        'U', 't', 'i', 'l', 'i', 't', 'y', 'N', 'o', 'E', 'x', 't',
+        'e', 'n', 's', 'i', 'o', 'n', '.', 0U,
+    };
+    static const uint16_t utility_path[] = {
+        'C', ':', '\\', 'G', 'a', 'm', 'e', 's', '\\', 'U', 't', 'i',
+        'l', 'i', 't', 'y', '.', 'd', 'l', 'l', 0U,
+    };
+    static const uint16_t kernel32_name[] = {
+        'K', 'E', 'R', 'N', 'E', 'L', '3', '2', '.', 'd', 'l', 'l', 0U,
+    };
+    static const uint16_t missing_name[] = {
+        'M', 'i', 's', 's', 'i', 'n', 'g', '.', 'd', 'l', 'l', 0U,
+    };
+    module_query_process current;
+    module_query_process foreign;
+    CHECK(prepare_module_query_process(
+        "Loader.exe", "LoaderAlias.dll", image_path,
+        sizeof(image_path) / sizeof(image_path[0]), &current));
+    CHECK(prepare_module_query_process(
+        "ForeignLoader.exe", "ForeignLoaderAlias.dll", image_path,
+        sizeof(image_path) / sizeof(image_path[0]), &foreign));
+
+    void *secondary_handle =
+        (void *)(uintptr_t)current.secondary_module->mapped->load_base;
+    void *foreign_handle =
+        (void *)(uintptr_t)foreign.secondary_module->mapped->load_base;
+    CHECK(secondary_handle != foreign_handle);
+    sl_win32_thread_context thread = {
+        .process = current.process,
+        .last_error = UINT32_C(0x10203040),
+    };
+    sl_win32_context_scope scope = {0};
+    CHECK(sl_win32_context_enter(&thread, &scope) == SL_OK);
+
+    sl_kernel32_set_last_error(UINT32_C(0x11223344));
+    CHECK(sl_kernel32_load_library_ex_w(utility_name, NULL, 0U) ==
+          secondary_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x11223344));
+    CHECK(sl_kernel32_load_library_ex_w(
+              utility_name, NULL,
+              SL_WIN32_LOAD_LIBRARY_SEARCH_SYSTEM32) == secondary_handle);
+    CHECK(sl_kernel32_load_library_ex_w(utility_alias, NULL, 0U) ==
+          secondary_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x11223344));
+
+    CHECK(sl_kernel32_free_library(secondary_handle) == SL_WIN32_TRUE);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x11223344));
+    CHECK(sl_kernel32_get_module_handle_w(utility_name) == secondary_handle);
+    CHECK(sl_kernel32_load_library_ex_w(utility_name, NULL, 0U) ==
+          secondary_handle);
+
+    CHECK(sl_kernel32_load_library_ex_w(NULL, NULL, 0U) == NULL);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(sl_kernel32_load_library_ex_w(
+              utility_name, (void *)(uintptr_t)1U, 0U) == NULL);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(sl_kernel32_load_library_ex_w(
+              utility_name, NULL, UINT32_C(0x80000000)) == NULL);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(sl_kernel32_load_library_ex_w(utility_path, NULL, 0U) == NULL);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+    CHECK(sl_kernel32_load_library_ex_w(kernel32_name, NULL, 0U) == NULL);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+    CHECK(sl_kernel32_load_library_ex_w(missing_name, NULL, 0U) == NULL);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+
+    sl_kernel32_set_last_error(UINT32_C(0x55667788));
+    CHECK(sl_kernel32_free_library(secondary_handle) == SL_WIN32_TRUE);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x55667788));
+    CHECK(sl_kernel32_free_library(NULL) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    CHECK(sl_kernel32_free_library(
+              (void *)((uintptr_t)secondary_handle + 1U)) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    CHECK(sl_kernel32_free_library(foreign_handle) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+
+    CHECK(sl_win32_context_leave(&scope) == SL_OK);
+    CHECK(sl_kernel32_load_library_ex_w(utility_name, NULL, 0U) == NULL);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+    CHECK(sl_kernel32_free_library(secondary_handle) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    CHECK(sl_win32_process_destroy(foreign.process) == SL_OK);
+    CHECK(sl_win32_process_destroy(current.process) == SL_OK);
+    return true;
+}
+
 static bool test_guarded_worker_installs_teb_in_gs(void) {
     uint8_t fixture[FIXTURE_SIZE];
     sl_pe_image image;
@@ -1608,6 +1705,8 @@ int main(void) {
          test_module_queries_follow_process_context},
         {"remaining module query contracts",
          test_remaining_module_query_contracts},
+        {"resident dynamic module contracts",
+         test_resident_dynamic_module_contracts},
         {"guard-page fault is contained", test_guard_fault_is_contained},
         {"crash report survives destroyed guest stack",
          test_crash_report_survives_destroyed_guest_stack},

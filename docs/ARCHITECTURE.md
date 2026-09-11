@@ -73,7 +73,7 @@ guest x86-64 entry point            NT/process object model
   worker installs the TEB base in GS only around guest execution and verifies
   restoration before releasing it.
 - `kernel32`: provides the first host-backed x86-64 `ms_abi` thunks. Current
-  coverage is a 59-export bootstrap subset backed by the minimal PEB/TEB
+  coverage is a 61-export bootstrap subset backed by the minimal PEB/TEB
   layouts. Module queries resolve only inside the installed process context.
   `GetModuleHandleW` and `GetModuleHandleExW` expose the main image or
   registered PE basenames; the latter can also identify a module by an address
@@ -81,13 +81,17 @@ guest x86-64 entry point            NT/process object model
   observational no-ops while the adopted module space keeps every module
   resident. `GetProcAddress` accepts exact export names or ordinals from a PE
   `HMODULE`, treats a null handle as the main image, and follows registry-backed
-  forwarders. `RtlPcToFileHeader` maps a
-  program counter back to its owning PE image. Path-bearing names are rejected
-  until the catalog owns canonical paths for every DLL.
+  forwarders. `RtlPcToFileHeader` maps a program counter back to its owning PE
+  image. `LoadLibraryExW` is deliberately catalog-only: it accepts the default
+  request and the launcher's measured System32-search flag, then reacquires an
+  already adopted PE basename. `FreeLibrary` validates that process-local
+  handle but leaves its mapping resident. Path-bearing names are rejected until
+  the catalog owns canonical paths for every DLL.
   `GetModuleFileNameW` returns the process-owned main-image path and implements
   modern null-terminated truncation. Native built-ins intentionally have no
-  `HMODULE`, and the subset does not yet constitute a complete loader, object,
-  filesystem, or exception runtime.
+  `HMODULE`; disk discovery, reference counts, unload, and `DllMain` remain
+  outside this facade. The subset does not yet constitute a complete loader,
+  object, filesystem, or exception runtime.
 - `win32`: defines the x86-64 calling-convention marker and identifies planned
   bootstrap module names.
 - CLI: owns files, prints target inventory, and exposes individual loader gates.

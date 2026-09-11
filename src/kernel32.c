@@ -780,6 +780,41 @@ sl_win32_bool SL_WINAPI sl_kernel32_get_module_handle_ex_w(
     return SL_WIN32_TRUE;
 }
 
+void *SL_WINAPI sl_kernel32_load_library_ex_w(const uint16_t *module_name,
+                                               void *reserved,
+                                               uint32_t flags) {
+    if (module_name == NULL || reserved != NULL ||
+        (flags & ~SL_WIN32_LOAD_LIBRARY_SEARCH_SYSTEM32) != 0U) {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
+        return NULL;
+    }
+
+    const sl_loaded_module *module = current_pe_module_by_name(module_name);
+    if (module == NULL || module->mapped == NULL ||
+        module->mapped->load_base == 0U ||
+        module->mapped->load_base > UINTPTR_MAX) {
+        sl_last_error = SL_ERROR_MOD_NOT_FOUND;
+        return NULL;
+    }
+
+    /* This bootstrap subset can reacquire resident modules but cannot load. */
+    return (void *)(uintptr_t)module->mapped->load_base;
+}
+
+sl_win32_bool SL_WINAPI sl_kernel32_free_library(void *module_handle) {
+    const sl_module_registry *registry = current_module_registry();
+    const sl_loaded_module *module = NULL;
+    if (registry == NULL || module_handle == NULL ||
+        sl_module_registry_resolve_handle(
+            registry, (uint64_t)(uintptr_t)module_handle, &module) != SL_OK) {
+        sl_last_error = SL_ERROR_INVALID_HANDLE;
+        return SL_WIN32_FALSE;
+    }
+
+    /* Adopted PE mappings remain resident until their process is destroyed. */
+    return SL_WIN32_TRUE;
+}
+
 uint32_t SL_WINAPI sl_kernel32_get_module_file_name_w(
     void *module_handle, uint16_t *filename, uint32_t size) {
     const sl_win32_process *process = current_process_if_installed();
@@ -2024,6 +2059,10 @@ static void initialize_kernel32_exports(void) {
                   sl_kernel32_get_module_handle_w);
     SL_ADD_EXPORT(exports, export_count, "GetModuleHandleExW",
                   sl_kernel32_get_module_handle_ex_w);
+    SL_ADD_EXPORT(exports, export_count, "LoadLibraryExW",
+                  sl_kernel32_load_library_ex_w);
+    SL_ADD_EXPORT(exports, export_count, "FreeLibrary",
+                  sl_kernel32_free_library);
     SL_ADD_EXPORT(exports, export_count, "GetModuleFileNameW",
                   sl_kernel32_get_module_file_name_w);
     SL_ADD_EXPORT(exports, export_count, "GetProcAddress",

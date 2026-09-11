@@ -25,10 +25,12 @@ With the built-in KERNEL32 bootstrap subset enabled, the current launcher-only
 link check against the profiled files resolves 58 symbols and leaves 14
 unresolved. `GetModuleHandleW`, `GetModuleFileNameW`, `GetModuleHandleExW`,
 `GetProcAddress`, and `RtlPcToFileHeader` account for the five-symbol gain over
-the previous 53/19 measurement. The remainder is concentrated in x64
-exception/unwind, dynamic module management, filesystem search/file
-positioning, and file creation. IAT binding remains intentionally skipped until
-the entire launcher import set resolves atomically.
+the previous 53/19 measurement. Since that reprobe, resident-only
+`LoadLibraryExW` and `FreeLibrary` have joined the built-in surface, so the next
+measurement should reach 60 resolved and 12 unresolved once the target volume
+is available again. The expected remainder is concentrated in x64
+exception/unwind and filesystem search/file positioning. IAT binding remains
+intentionally skipped until the entire launcher import set resolves atomically.
 
 The launcher's CRT path reads `GS:[0x30]` and `GS:[0x60]` before reaching
 `UnityMain2`, then consumes TEB stack bounds and PEB process parameters. A
@@ -52,20 +54,22 @@ context: `GetModuleHandleW` and `GetModuleHandleExW` expose PE mapping bases by
 basename or mapped address, `GetProcAddress` resolves named and ordinal exports
 plus forwarders, and `RtlPcToFileHeader` identifies the PE range containing a
 program counter. Module pin/reference-count flags do not change lifetime yet
-because every adopted module remains resident. `GetModuleFileNameW` returns the
-real copied main-image path and follows modern null-terminated truncation
-behavior. Path-bearing lookups remain rejected until the loader owns canonical
-paths for every DLL, and native built-ins still have no `HMODULE`. This closes
-an ownership and image-substitution gap, but it does not make the profiled game
-graph runnable.
+because every adopted module remains resident. `LoadLibraryExW` now reacquires
+those existing PE mappings by basename for the default and measured
+System32-search requests; `FreeLibrary` validates their handles but deliberately
+does not unload them. `GetModuleFileNameW` returns the real copied main-image
+path and follows modern null-terminated truncation behavior. Path-bearing
+lookups remain rejected until the loader owns canonical paths for every DLL,
+and native built-ins still have no `HMODULE`. This closes an ownership and
+image-substitution gap, but it does not make the profiled game graph runnable.
 
 The execution mapper now reserves this launcher at `0x140000000` on the profiled
 host, applies its final page protections, and identifies the entry address as
 `0x140001264`. SadLayer still does not transfer control to it: the remaining
 launcher imports, recursive UnityPlayer dependency binding, initialization
 order, API Set routing, PE TLS, and exception/unwind support are explicit gates.
-The next launcher-specific work is dynamic module loading, filesystem/search,
-and the remaining x64 exception/unwind surface.
+The next launcher-specific work is recursive module discovery/loading,
+filesystem/search, and the remaining x64 exception/unwind surface.
 
 ## Direct UnityPlayer modules
 

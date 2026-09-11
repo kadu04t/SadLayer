@@ -36,7 +36,7 @@ The bootstrap can already:
   UTF-16 copy of its guest-visible path while keeping `PEB.ImageBaseAddress`
   equal to the main mapping;
 - bind PE32/PE32+ import address tables without partial writes;
-- expose an initial 59-export `KERNEL32.dll` subset through x86-64 `ms_abi`
+- expose an initial 61-export `KERNEL32.dll` subset through x86-64 `ms_abi`
   thunks for last-error state, time/identity, heap, TLS, no-fiber FLS, critical
   sections, text conversion, process strings, locale basics, standard streams,
   pointer encoding, process-scoped PE module queries, and process termination;
@@ -86,13 +86,15 @@ main image or a registered basename; address lookup uses PE image ranges, and
 the supported reference-count flags are currently no-ops because adopted
 modules remain resident for the process lifetime. `GetProcAddress` resolves PE
 exports by exact name or ordinal, treats a null handle as the main image, follows
-registry-backed forwarders, and
-`RtlPcToFileHeader` reports the PE mapping that owns an address.
+registry-backed forwarders, and `RtlPcToFileHeader` reports the PE mapping that
+owns an address. `LoadLibraryExW` can reacquire an already adopted PE by
+basename, while `FreeLibrary` validates its process-local handle and keeps the
+mapping resident.
 `GetModuleFileNameW` exposes the process's copied main-image path with modern
 null-terminated truncation behavior. Full-path module lookup, native built-in
-`HMODULE` values, filename queries for non-main modules, recursive DLL loading,
-complete API Set contract mapping, PE TLS, and exception/unwind support remain
-future loader milestones.
+`HMODULE` values, filename queries for non-main modules, DLL discovery/loading
+from disk, per-module reference counts and unloading, complete API Set contract
+mapping, PE TLS, and exception/unwind support remain future loader milestones.
 See
 [ROADMAP.md](ROADMAP.md) for the ordered compatibility plan and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries.

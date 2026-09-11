@@ -95,6 +95,7 @@ static bool test_export_surface_and_abi(void) {
         "WideCharToMultiByte",   "GetCommandLineA",
         "GetCommandLineW",       "GetEnvironmentStringsW",
         "GetModuleHandleW",      "GetModuleHandleExW",
+        "LoadLibraryExW",        "FreeLibrary",
         "GetModuleFileNameW",    "GetProcAddress",
         "RtlPcToFileHeader",
         "FreeEnvironmentStringsW", "GetStringTypeW",

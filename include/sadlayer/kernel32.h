@@ -33,6 +33,7 @@
 #define SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_PIN 0x00000001U
 #define SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT 0x00000002U
 #define SL_WIN32_GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS 0x00000004U
+#define SL_WIN32_LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800U
 
 typedef int32_t sl_win32_bool;
 
@@ -99,6 +100,10 @@ uint16_t *SL_WINAPI sl_kernel32_get_command_line_w(void);
 void *SL_WINAPI sl_kernel32_get_module_handle_w(const uint16_t *module_name);
 sl_win32_bool SL_WINAPI sl_kernel32_get_module_handle_ex_w(
     uint32_t flags, const uint16_t *module_name, void **module);
+void *SL_WINAPI sl_kernel32_load_library_ex_w(const uint16_t *module_name,
+                                               void *reserved,
+                                               uint32_t flags);
+sl_win32_bool SL_WINAPI sl_kernel32_free_library(void *module);
 uint32_t SL_WINAPI sl_kernel32_get_module_file_name_w(
     void *module, uint16_t *filename, uint32_t size);
 void *SL_WINAPI sl_kernel32_get_proc_address(void *module,

@@ -101,13 +101,16 @@ Implement the minimum coherent process model rather than isolated stubs:
   resident-module flag semantics and address lookup, `GetProcAddress` by name
   or ordinal with forwarder resolution, and `RtlPcToFileHeader` over mapped PE
   ranges. Native built-ins intentionally remain outside the `HMODULE` model.
+- [x] Resident-only dynamic-module facade: `LoadLibraryExW` reacquires an
+  already adopted PE for the default or measured System32-search request, and
+  `FreeLibrary` validates the process-local handle without unloading it.
 - [ ] PE TLS directory/callbacks, validated guest pointers, and coherent
   handles/object lifetimes.
 - [ ] Fiber contexts and process-wide FLS callback enumeration.
 - [ ] Current directory, Windows path normalization, virtual memory, files,
   directories, mappings, waits, synchronization objects, and threads.
-- [ ] Remaining launcher imports: dynamic module loading, filesystem/search,
-  and the remaining x64 exception/unwind APIs.
+- [ ] Remaining launcher imports: recursive module discovery/loading,
+  filesystem/search, and the remaining x64 exception/unwind APIs.
 - [ ] Registry overlay stored inside a SadLayer prefix.
 
 Exit gate: purpose-built PE conformance programs pass file, memory, threading,
