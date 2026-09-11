@@ -28,6 +28,7 @@
 #define SL_ERROR_WRITE_FAULT 29U
 #define SL_ERROR_INVALID_PARAMETER 87U
 #define SL_ERROR_INSUFFICIENT_BUFFER 122U
+#define SL_ERROR_MOD_NOT_FOUND 126U
 #define SL_ERROR_INVALID_FLAGS 1004U
 #define SL_ERROR_NO_UNICODE_TRANSLATION 1113U
 #define SL_HEAP_ZERO_MEMORY 0x00000008U
@@ -611,13 +612,18 @@ static void SL_WINAPI sl_kernel32_initialize_slist_head(void *list_head) {
     }
 }
 
-static const sl_win32_process *current_process(void) {
+static const sl_win32_process *current_process_if_installed(void) {
     sl_win32_thread_context *thread = sl_win32_context_current();
-    if (thread == NULL || thread->process == NULL) {
+    return thread == NULL ? NULL : thread->process;
+}
+
+static const sl_win32_process *current_process(void) {
+    const sl_win32_process *process = current_process_if_installed();
+    if (process == NULL) {
         /* The future guest dispatcher must install a process before handoff. */
         abort();
     }
-    return thread->process;
+    return process;
 }
 
 static void *SL_WINAPI sl_kernel32_encode_pointer(void *pointer) {
@@ -630,6 +636,140 @@ static void *SL_WINAPI sl_kernel32_decode_pointer(void *pointer) {
     uintptr_t decoded = sl_win32_process_decode_pointer(
         current_process(), (uintptr_t)pointer);
     return (void *)decoded;
+}
+
+static bool wide_module_name_to_utf8(const uint16_t *wide_name,
+                                     char name[SL_MODULE_NAME_CAPACITY]) {
+    if (wide_name == NULL) {
+        return false;
+    }
+    size_t wide_length = 0U;
+    while (wide_length < SL_MODULE_NAME_CAPACITY &&
+           wide_name[wide_length] != 0U) {
+        ++wide_length;
+    }
+    if (wide_length == 0U || wide_length == SL_MODULE_NAME_CAPACITY) {
+        return false;
+    }
+
+    size_t required = 0U;
+    if (sl_utf16_to_utf8(wide_name, wide_length, NULL, 0U, &required) !=
+            SL_OK ||
+        required >= SL_MODULE_NAME_CAPACITY) {
+        return false;
+    }
+    size_t written = 0U;
+    if (sl_utf16_to_utf8(wide_name, wide_length, name,
+                         SL_MODULE_NAME_CAPACITY - 1U, &written) != SL_OK) {
+        return false;
+    }
+    name[written] = '\0';
+
+    if (strchr(name, '\\') != NULL || strchr(name, '/') != NULL ||
+        strchr(name, ':') != NULL) {
+        return false;
+    }
+
+    char *extension = strrchr(name, '.');
+    if (extension == NULL) {
+        static const char suffix[] = ".dll";
+        if (written > SL_MODULE_NAME_CAPACITY - sizeof(suffix)) {
+            return false;
+        }
+        memcpy(name + written, suffix, sizeof(suffix));
+    } else if (extension[1] == '\0') {
+        if (extension == name) {
+            return false;
+        }
+        *extension = '\0';
+    }
+    return true;
+}
+
+static const sl_loaded_module *current_pe_module_by_name(
+    const uint16_t *module_name) {
+    const sl_win32_process *process = current_process_if_installed();
+    if (process == NULL) {
+        return NULL;
+    }
+    if (module_name == NULL) {
+        return sl_win32_process_main_module(process);
+    }
+
+    const sl_module_space *space = sl_win32_process_module_space(process);
+    const sl_module_registry *registry = sl_module_space_registry(space);
+    char name[SL_MODULE_NAME_CAPACITY];
+    const sl_loaded_module *module = NULL;
+    if (registry == NULL || !wide_module_name_to_utf8(module_name, name) ||
+        sl_module_registry_resolve_module(registry, name, &module) != SL_OK ||
+        module->kind != SL_MODULE_PE || module->mapped == NULL) {
+        return NULL;
+    }
+    return module;
+}
+
+void *SL_WINAPI sl_kernel32_get_module_handle_w(
+    const uint16_t *module_name) {
+    const sl_loaded_module *module = current_pe_module_by_name(module_name);
+    if (module == NULL || module->mapped == NULL ||
+        module->mapped->load_base == 0U ||
+        module->mapped->load_base > UINTPTR_MAX) {
+        sl_last_error = SL_ERROR_MOD_NOT_FOUND;
+        return NULL;
+    }
+    return (void *)(uintptr_t)module->mapped->load_base;
+}
+
+uint32_t SL_WINAPI sl_kernel32_get_module_file_name_w(
+    void *module_handle, uint16_t *filename, uint32_t size) {
+    const sl_win32_process *process = current_process_if_installed();
+    const sl_loaded_module *main_module =
+        sl_win32_process_main_module(process);
+    const sl_loaded_module *requested_module = main_module;
+    if (process != NULL && module_handle != NULL) {
+        const sl_module_space *space =
+            sl_win32_process_module_space(process);
+        const sl_module_registry *registry =
+            sl_module_space_registry(space);
+        requested_module = NULL;
+        if (registry != NULL) {
+            (void)sl_module_registry_resolve_handle(
+                registry, (uint64_t)(uintptr_t)module_handle,
+                &requested_module);
+        }
+    }
+    if (process == NULL || main_module == NULL || main_module->mapped == NULL ||
+        requested_module != main_module) {
+        sl_last_error = SL_ERROR_MOD_NOT_FOUND;
+        return 0U;
+    }
+
+    const uint16_t *path = NULL;
+    size_t path_length = 0U;
+    if (sl_win32_process_main_image_path(process, &path, &path_length) !=
+        SL_OK) {
+        sl_last_error = SL_ERROR_MOD_NOT_FOUND;
+        return 0U;
+    }
+    if (size == 0U) {
+        sl_last_error = SL_ERROR_INSUFFICIENT_BUFFER;
+        return 0U;
+    }
+    if (filename == NULL) {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
+        return 0U;
+    }
+
+    if ((size_t)size <= path_length) {
+        size_t copy_length = (size_t)size - 1U;
+        memcpy(filename, path, copy_length * sizeof(*filename));
+        filename[copy_length] = 0U;
+        sl_last_error = SL_ERROR_INSUFFICIENT_BUFFER;
+        return size;
+    }
+    memcpy(filename, path, path_length * sizeof(*filename));
+    filename[path_length] = 0U;
+    return (uint32_t)path_length;
 }
 
 static uint32_t SL_WINAPI sl_kernel32_get_acp(void) { return 1252U; }
@@ -1761,6 +1901,10 @@ static void initialize_kernel32_exports(void) {
                   sl_kernel32_get_command_line_a);
     SL_ADD_EXPORT(exports, export_count, "GetCommandLineW",
                   sl_kernel32_get_command_line_w);
+    SL_ADD_EXPORT(exports, export_count, "GetModuleHandleW",
+                  sl_kernel32_get_module_handle_w);
+    SL_ADD_EXPORT(exports, export_count, "GetModuleFileNameW",
+                  sl_kernel32_get_module_file_name_w);
     SL_ADD_EXPORT(exports, export_count, "GetEnvironmentStringsW",
                   sl_kernel32_get_environment_strings_w);
     SL_ADD_EXPORT(exports, export_count, "FreeEnvironmentStringsW",

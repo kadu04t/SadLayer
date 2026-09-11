@@ -702,6 +702,312 @@ static bool test_process_main_worker_and_legacy_identity(void) {
     return true;
 }
 
+typedef struct {
+    sl_win32_process *process;
+    const sl_loaded_module *main_module;
+    const sl_loaded_module *secondary_module;
+} module_query_process;
+
+static bool prepare_module_query_process(
+    const char *main_name, const char *alias_name, const uint16_t *image_path,
+    size_t image_path_length, module_query_process *result) {
+    uint8_t fixture[FIXTURE_SIZE];
+    uint8_t secondary_fixture[FIXTURE_SIZE];
+    sl_module_space *space = NULL;
+    sl_win32_process *process = NULL;
+    const sl_loaded_module *main_module = NULL;
+    const sl_loaded_module *secondary_module = NULL;
+    size_t bound_count = 99U;
+
+    *result = (module_query_process){0};
+    make_worker_runtime_fixture(fixture);
+    make_worker_runtime_fixture(secondary_fixture);
+    if (sl_win32_process_create(&process) != SL_OK ||
+        sl_module_space_create(&space) != SL_OK ||
+        sl_module_space_add_pe(
+            space, main_name,
+            (sl_byte_view){fixture, sizeof(fixture)}, &main_module) != SL_OK ||
+        sl_module_space_add_pe(
+            space, "Utility.dll",
+            (sl_byte_view){secondary_fixture, sizeof(secondary_fixture)},
+            &secondary_module) != SL_OK ||
+        sl_kernel32_register_space(space) != SL_OK ||
+        sl_module_space_add_alias(space, alias_name, main_name) != SL_OK ||
+        sl_module_space_add_alias(space, "UtilityNoExtension",
+                                  "Utility.dll") != SL_OK ||
+        sl_module_space_bind_imports(space, main_module, &bound_count) !=
+            SL_OK ||
+        bound_count != 2U ||
+        sl_module_space_finalize(space, main_module) != SL_OK ||
+        !main_module->mapped->protections_finalized ||
+        sl_module_space_bind_imports(space, secondary_module, &bound_count) !=
+            SL_OK ||
+        bound_count != 2U ||
+        sl_module_space_finalize(space, secondary_module) != SL_OK ||
+        !secondary_module->mapped->protections_finalized ||
+        sl_win32_process_adopt_module_space(
+            process, &space, main_module, image_path, image_path_length) !=
+            SL_OK) {
+        sl_module_space_destroy(space);
+        if (process != NULL) {
+            (void)sl_win32_process_destroy(process);
+        }
+        return false;
+    }
+
+    result->process = process;
+    result->main_module = main_module;
+    result->secondary_module = secondary_module;
+    return true;
+}
+
+static void fill_wide_buffer(uint16_t *buffer, size_t count, uint16_t value) {
+    for (size_t index = 0U; index < count; ++index) {
+        buffer[index] = value;
+    }
+}
+
+static bool test_module_queries_follow_process_context(void) {
+    static const uint16_t first_path[] = {
+        'C', ':', '\\', 'G', 'a', 'm', 'e', 's', '\\', 'F', 'i', 'r',
+        's', 't', '\\', 'R', 'u', 'n', 't', 'i', 'm', 'e', 'A', '.', 'e',
+        'x', 'e',
+    };
+    static const uint16_t second_path[] = {
+        'D', ':', '\\', 'G', 'a', 'm', 'e', 's', '\\', 0xd83dU, 0xdc1bU,
+        '\\', 'R', 'u', 'n', 't', 'i', 'm', 'e', 'B', '.', 'e', 'x', 'e',
+    };
+    static const uint16_t first_exact[] = {
+        'R', 'u', 'n', 't', 'i', 'm', 'e', 'A', '.', 'e', 'x', 'e', 0U,
+    };
+    static const uint16_t first_mixed_case[] = {
+        'r', 'U', 'n', 'T', 'i', 'M', 'e', 'A', '.', 'E', 'x', 'E', 0U,
+    };
+    static const uint16_t first_alias_without_extension[] = {
+        'r', 'U', 'n', 'T', 'i', 'M', 'e', 'A', 'l', 'I', 'a', 'S', 'a', 0U,
+    };
+    static const uint16_t second_exact[] = {
+        'R', 'u', 'n', 't', 'i', 'm', 'e', 'B', '.', 'e', 'x', 'e', 0U,
+    };
+    static const uint16_t secondary_exact[] = {
+        'U', 't', 'i', 'l', 'i', 't', 'y', '.', 'd', 'l', 'l', 0U,
+    };
+    static const uint16_t secondary_mixed_without_extension[] = {
+        'u', 'T', 'i', 'L', 'i', 'T', 'y', 0U,
+    };
+    static const uint16_t secondary_path_with_dotted_directory[] = {
+        'C', ':', '\\', 'd', 'i', 'r', '.', 'v', '1', '\\',
+        'U', 't', 'i', 'l', 'i', 't', 'y', 0U,
+    };
+    static const uint16_t secondary_trailing_period[] = {
+        'U', 't', 'i', 'l', 'i', 't', 'y', 'N', 'o', 'E', 'x', 't',
+        'e', 'n', 's', 'i', 'o', 'n', '.', 0U,
+    };
+    static const uint16_t kernel32_name[] = {
+        'K', 'E', 'R', 'N', 'E', 'L', '3', '2', '.', 'd', 'l', 'l', 0U,
+    };
+    static const uint16_t absent_name[] = {
+        'M', 'i', 's', 's', 'i', 'n', 'g', '.', 'd', 'l', 'l', 0U,
+    };
+    const size_t first_path_length =
+        sizeof(first_path) / sizeof(first_path[0]);
+    const size_t second_path_length =
+        sizeof(second_path) / sizeof(second_path[0]);
+    module_query_process first;
+    module_query_process second;
+    CHECK(prepare_module_query_process(
+        "RuntimeA.exe", "RuntimeAliasA.dll", first_path, first_path_length,
+        &first));
+    CHECK(prepare_module_query_process(
+        "RuntimeB.exe", "RuntimeAliasB.dll", second_path, second_path_length,
+        &second));
+    CHECK(first.main_module->mapped->load_base !=
+          second.main_module->mapped->load_base);
+
+    sl_win32_thread_context first_thread = {
+        .process = first.process,
+        .last_error = UINT32_C(0x11112222),
+    };
+    sl_win32_thread_context second_thread = {
+        .process = second.process,
+        .last_error = UINT32_C(0x33334444),
+    };
+    sl_win32_context_scope first_scope = {0};
+    sl_win32_context_scope second_scope = {0};
+    CHECK(sl_win32_context_enter(&first_thread, &first_scope) == SL_OK);
+
+    void *first_handle =
+        (void *)(uintptr_t)first.main_module->mapped->load_base;
+    void *first_secondary_handle =
+        (void *)(uintptr_t)first.secondary_module->mapped->load_base;
+    sl_kernel32_set_last_error(UINT32_C(0xa1a2a3a4));
+    CHECK(sl_kernel32_get_module_handle_w(NULL) == first_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0xa1a2a3a4));
+    CHECK(sl_kernel32_get_module_handle_w(first_exact) == first_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0xa1a2a3a4));
+    CHECK(sl_kernel32_get_module_handle_w(first_mixed_case) == first_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0xa1a2a3a4));
+    CHECK(sl_kernel32_get_module_handle_w(first_alias_without_extension) ==
+          first_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0xa1a2a3a4));
+    CHECK(sl_kernel32_get_module_handle_w(secondary_exact) ==
+          first_secondary_handle);
+    CHECK(sl_kernel32_get_module_handle_w(
+              secondary_mixed_without_extension) == first_secondary_handle);
+    CHECK(sl_kernel32_get_module_handle_w(
+              secondary_path_with_dotted_directory) == NULL);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+    sl_kernel32_set_last_error(UINT32_C(0xa1a2a3a4));
+    CHECK(sl_kernel32_get_module_handle_w(secondary_trailing_period) ==
+          first_secondary_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0xa1a2a3a4));
+
+    CHECK(sl_kernel32_get_module_handle_w(kernel32_name) == NULL);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+    CHECK(sl_kernel32_get_module_handle_w(absent_name) == NULL);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+
+    uint16_t filename[64];
+    fill_wide_buffer(filename, sizeof(filename) / sizeof(filename[0]),
+                     0xa5a5U);
+    sl_kernel32_set_last_error(UINT32_C(0xb1b2b3b4));
+    CHECK(sl_kernel32_get_module_file_name_w(
+              NULL, filename, (uint32_t)(first_path_length + 1U)) ==
+          (uint32_t)first_path_length);
+    CHECK(memcmp(filename, first_path,
+                 first_path_length * sizeof(first_path[0])) == 0);
+    CHECK(filename[first_path_length] == 0U);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0xb1b2b3b4));
+
+    fill_wide_buffer(filename, sizeof(filename) / sizeof(filename[0]),
+                     0xa5a5U);
+    sl_kernel32_set_last_error(UINT32_C(0xc1c2c3c4));
+    CHECK(sl_kernel32_get_module_file_name_w(
+              first_handle, filename,
+              (uint32_t)(first_path_length + 1U)) ==
+          (uint32_t)first_path_length);
+    CHECK(memcmp(filename, first_path,
+                 first_path_length * sizeof(first_path[0])) == 0);
+    CHECK(filename[first_path_length] == 0U);
+    CHECK(filename[first_path_length + 1U] == 0xa5a5U);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0xc1c2c3c4));
+
+    fill_wide_buffer(filename, sizeof(filename) / sizeof(filename[0]),
+                     0xa5a5U);
+    sl_kernel32_set_last_error(0U);
+    CHECK(sl_kernel32_get_module_file_name_w(
+              first_handle, filename, (uint32_t)first_path_length) ==
+          (uint32_t)first_path_length);
+    CHECK(memcmp(filename, first_path,
+                 (first_path_length - 1U) * sizeof(first_path[0])) == 0);
+    CHECK(filename[first_path_length - 1U] == 0U);
+    CHECK(filename[first_path_length] == 0xa5a5U);
+    CHECK(sl_kernel32_get_last_error() == 122U);
+
+    fill_wide_buffer(filename, sizeof(filename) / sizeof(filename[0]),
+                     0xa5a5U);
+    CHECK(sl_kernel32_get_module_file_name_w(first_handle, filename, 4U) ==
+          4U);
+    CHECK(memcmp(filename, first_path, 3U * sizeof(first_path[0])) == 0);
+    CHECK(filename[3] == 0U && filename[4] == 0xa5a5U);
+    CHECK(sl_kernel32_get_last_error() == 122U);
+
+    fill_wide_buffer(filename, sizeof(filename) / sizeof(filename[0]),
+                     0xa5a5U);
+    CHECK(sl_kernel32_get_module_file_name_w(first_handle, filename, 1U) ==
+          1U);
+    CHECK(filename[0] == 0U && filename[1] == 0xa5a5U);
+    CHECK(sl_kernel32_get_last_error() == 122U);
+
+    fill_wide_buffer(filename, sizeof(filename) / sizeof(filename[0]),
+                     0xa5a5U);
+    uint16_t unchanged[64];
+    memcpy(unchanged, filename, sizeof(filename));
+    CHECK(sl_kernel32_get_module_file_name_w(first_handle, filename, 0U) ==
+          0U);
+    CHECK(sl_kernel32_get_last_error() == 122U);
+    CHECK(memcmp(filename, unchanged, sizeof(filename)) == 0);
+    CHECK(sl_kernel32_get_module_file_name_w(
+              first_handle, NULL, (uint32_t)(first_path_length + 1U)) == 0U);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+
+    fill_wide_buffer(filename, sizeof(filename) / sizeof(filename[0]),
+                     0xa5a5U);
+    memcpy(unchanged, filename, sizeof(filename));
+    CHECK(sl_kernel32_get_module_file_name_w(
+              (void *)(uintptr_t)UINT64_C(0x12345000), filename,
+              (uint32_t)(first_path_length + 1U)) == 0U);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+    CHECK(memcmp(filename, unchanged, sizeof(filename)) == 0);
+    CHECK(sl_kernel32_get_module_file_name_w(
+              first_secondary_handle, filename,
+              (uint32_t)(first_path_length + 1U)) == 0U);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+    CHECK(memcmp(filename, unchanged, sizeof(filename)) == 0);
+
+    sl_kernel32_set_last_error(UINT32_C(0x51525354));
+    CHECK(sl_win32_context_enter(&second_thread, &second_scope) == SL_OK);
+    void *second_handle =
+        (void *)(uintptr_t)second.main_module->mapped->load_base;
+    void *second_secondary_handle =
+        (void *)(uintptr_t)second.secondary_module->mapped->load_base;
+    CHECK(sl_kernel32_get_module_handle_w(NULL) == second_handle);
+    CHECK(sl_kernel32_get_module_handle_w(second_exact) == second_handle);
+    CHECK(sl_kernel32_get_module_handle_w(secondary_exact) ==
+          second_secondary_handle);
+    CHECK(second_secondary_handle != first_secondary_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x33334444));
+
+    fill_wide_buffer(filename, sizeof(filename) / sizeof(filename[0]),
+                     0xa5a5U);
+    CHECK(sl_kernel32_get_module_file_name_w(
+              second_handle, filename,
+              (uint32_t)(second_path_length + 1U)) ==
+          (uint32_t)second_path_length);
+    CHECK(memcmp(filename, second_path,
+                 second_path_length * sizeof(second_path[0])) == 0);
+    CHECK(filename[second_path_length] == 0U);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x33334444));
+
+    fill_wide_buffer(filename, sizeof(filename) / sizeof(filename[0]),
+                     0xa5a5U);
+    memcpy(unchanged, filename, sizeof(filename));
+    CHECK(sl_kernel32_get_module_file_name_w(
+              first_handle, filename,
+              (uint32_t)(first_path_length + 1U)) == 0U);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+    CHECK(memcmp(filename, unchanged, sizeof(filename)) == 0);
+    CHECK(sl_kernel32_get_module_file_name_w(
+              first_secondary_handle, filename,
+              (uint32_t)(first_path_length + 1U)) == 0U);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+    CHECK(memcmp(filename, unchanged, sizeof(filename)) == 0);
+    CHECK(sl_kernel32_get_module_handle_w(first_exact) == NULL);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+    CHECK(sl_kernel32_get_module_handle_w(kernel32_name) == NULL);
+    CHECK(sl_kernel32_get_last_error() == 126U);
+
+    sl_kernel32_set_last_error(UINT32_C(0x61626364));
+    CHECK(sl_win32_context_leave(&second_scope) == SL_OK);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x51525354));
+    CHECK(sl_kernel32_get_module_handle_w(NULL) == first_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x51525354));
+    fill_wide_buffer(filename, sizeof(filename) / sizeof(filename[0]),
+                     0xa5a5U);
+    CHECK(sl_kernel32_get_module_file_name_w(
+              NULL, filename, (uint32_t)(first_path_length + 1U)) ==
+          (uint32_t)first_path_length);
+    CHECK(memcmp(filename, first_path,
+                 first_path_length * sizeof(first_path[0])) == 0);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x51525354));
+
+    CHECK(sl_win32_context_leave(&first_scope) == SL_OK);
+    CHECK(sl_win32_context_current() == NULL);
+    CHECK(sl_win32_process_destroy(second.process) == SL_OK);
+    CHECK(sl_win32_process_destroy(first.process) == SL_OK);
+    return true;
+}
+
 static bool test_guarded_worker_installs_teb_in_gs(void) {
     uint8_t fixture[FIXTURE_SIZE];
     sl_pe_image image;
@@ -1052,6 +1358,8 @@ int main(void) {
          test_worker_validates_arguments_image_and_state},
         {"process main worker and legacy identity",
          test_process_main_worker_and_legacy_identity},
+        {"module queries follow process context",
+         test_module_queries_follow_process_context},
         {"guard-page fault is contained", test_guard_fault_is_contained},
         {"crash report survives destroyed guest stack",
          test_crash_report_survives_destroyed_guest_stack},

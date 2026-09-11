@@ -25,7 +25,10 @@ With the built-in KERNEL32 bootstrap subset enabled, the current launcher-only
 link check resolves 53 symbols and leaves 19 unresolved. The unresolved set is
 concentrated in x64 exception/unwind, dynamic module management, filesystem
 search/file positioning, and file creation. IAT binding remains intentionally
-skipped until the entire launcher import set resolves atomically.
+skipped until the entire launcher import set resolves atomically. This is the
+last measurement from the profiled files; adding `GetModuleHandleW` and
+`GetModuleFileNameW` should move the next reprobe to 55 resolved and 17
+unresolved once the target volume is available again.
 
 The launcher's CRT path reads `GS:[0x30]` and `GS:[0x60]` before reaching
 `UnityMain2`, then consumes TEB stack bounds and PEB process parameters. A
@@ -44,7 +47,12 @@ The synthetic process path can now adopt one completely bound and finalized
 module space, keep the exact main PE plus a private UTF-16 image-path copy, and
 derive `PEB.ImageBaseAddress` and worker execution from that same identity.
 Read-only getters expose those values without reopening loader mutation after
-publication. This closes an ownership and image-substitution gap, but it does
+publication. `GetModuleHandleW` now exposes PE mapping bases through the active
+process context for the main image and registered basenames, while
+`GetModuleFileNameW` returns the real copied main-image path and follows modern
+null-terminated truncation behavior. Path-bearing lookups remain rejected until
+the loader owns canonical paths for every DLL, and native built-ins still have
+no `HMODULE`. This closes an ownership and image-substitution gap, but it does
 not make the profiled game graph runnable.
 
 The execution mapper now reserves this launcher at `0x140000000` on the profiled
@@ -52,9 +60,8 @@ host, applies its final page protections, and identifies the entry address as
 `0x140001264`. SadLayer still does not transfer control to it: the remaining
 launcher imports, recursive UnityPlayer dependency binding, initialization
 order, API Set routing, PE TLS, and exception/unwind support are explicit gates.
-The next launcher-specific step is the still-unimplemented module-query cluster:
-`GetModuleHandleW`, `GetModuleHandleExW`, `GetModuleFileNameW`,
-`GetProcAddress`, and `RtlPcToFileHeader`.
+The next launcher-specific step is finishing the module-query cluster:
+`GetModuleHandleExW`, `GetProcAddress`, and `RtlPcToFileHeader`.
 
 ## Direct UnityPlayer modules
 
@@ -78,8 +85,9 @@ The first loader path must support x86-64 base relocations, named and ordinal
 imports, API Set aliases, DLL export lookup, IAT patching, TLS inspection, and
 x64 unwind metadata. Generic alias-aware import/IAT/forwarder plumbing now
 exists, and explicitly supplied PE files can now share an owning module space;
-recursive discovery and authoritative mappings for the target contracts are
-still required.
+PE-only handle/address lookup and the first process-local module queries are
+also in place. Recursive discovery and authoritative mappings for the target
+contracts are still required.
 The inventory does not prove which graphics path is chosen at runtime, so both
 imported graphics families remain candidates until tracing captures the actual
 initialization path.

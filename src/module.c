@@ -213,6 +213,44 @@ sl_status sl_module_registry_resolve_module(
     return SL_OK;
 }
 
+sl_status sl_module_registry_resolve_handle(
+    const sl_module_registry *registry, uint64_t handle,
+    const sl_loaded_module **result) {
+    if (registry == NULL || handle == 0U || result == NULL) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    for (size_t index = 0U; index < registry->count; ++index) {
+        const sl_loaded_module *module = &registry->modules[index];
+        if (module->kind == SL_MODULE_PE && module->mapped != NULL &&
+            module->mapped->load_base == handle) {
+            *result = module;
+            return SL_OK;
+        }
+    }
+    return SL_ERROR_MODULE_NOT_FOUND;
+}
+
+sl_status sl_module_registry_resolve_address(
+    const sl_module_registry *registry, uint64_t address,
+    const sl_loaded_module **result) {
+    if (registry == NULL || address == 0U || result == NULL) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    for (size_t index = 0U; index < registry->count; ++index) {
+        const sl_loaded_module *module = &registry->modules[index];
+        if (module->kind != SL_MODULE_PE || module->mapped == NULL) {
+            continue;
+        }
+        uint64_t base = module->mapped->load_base;
+        if (base != 0U && address >= base &&
+            address - base < (uint64_t)module->mapped->size) {
+            *result = module;
+            return SL_OK;
+        }
+    }
+    return SL_ERROR_MODULE_NOT_FOUND;
+}
+
 static sl_status parse_forwarder(const char *forwarder, char *module_name,
                                  size_t module_capacity, const char **symbol,
                                  uint32_t *ordinal, bool *by_ordinal) {

@@ -93,6 +93,9 @@ int32_t SL_WINAPI sl_kernel32_wide_char_to_multi_byte(
     const char *default_character, sl_win32_bool *used_default_character);
 char *SL_WINAPI sl_kernel32_get_command_line_a(void);
 uint16_t *SL_WINAPI sl_kernel32_get_command_line_w(void);
+void *SL_WINAPI sl_kernel32_get_module_handle_w(const uint16_t *module_name);
+uint32_t SL_WINAPI sl_kernel32_get_module_file_name_w(
+    void *module, uint16_t *filename, uint32_t size);
 uint16_t *SL_WINAPI sl_kernel32_get_environment_strings_w(void);
 sl_win32_bool SL_WINAPI sl_kernel32_free_environment_strings_w(
     uint16_t *environment);

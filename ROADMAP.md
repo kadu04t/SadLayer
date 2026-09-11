@@ -55,6 +55,8 @@ Implement, in order:
 - [x] One-shot process adoption of a fully bound and finalized module space,
   with immutable main-module/path views, coherent `PEB.ImageBaseAddress`, and a
   process-main worker entry that rejects unrelated image descriptors.
+- [x] PE-only module handle and mapped-address lookup, using the exact mapping
+  base as `HMODULE` without assigning handles to aliases or native built-ins.
 - [ ] Recursive DLL discovery and delay imports.
 - [ ] API Set schema/policy and authoritative contract-to-host mappings.
 - [ ] PE TLS directory, callbacks, and per-module thread data.
@@ -91,15 +93,18 @@ Implement the minimum coherent process model rather than isolated stubs:
   KERNEL32 last-error aliases the TEB cell when attached.
 - [x] GS-backed TEB installation and guarded guest stack for the isolated
   bootstrap worker.
+- [x] Process-local `GetModuleHandleW` for the main image and registered PE
+  basenames, plus `GetModuleFileNameW` for the copied main-image path with
+  modern null-terminated truncation behavior. Full-path lookup waits for
+  per-DLL canonical paths.
 - [ ] PE TLS directory/callbacks, validated guest pointers, and coherent
   handles/object lifetimes.
 - [ ] Fiber contexts and process-wide FLS callback enumeration.
 - [ ] Current directory, Windows path normalization, virtual memory, files,
   directories, mappings, waits, synchronization objects, and threads.
-- [ ] Remaining launcher imports: first the module-query cluster
-  (`GetModuleHandleW`, `GetModuleHandleExW`, `GetModuleFileNameW`,
-  `GetProcAddress`, and `RtlPcToFileHeader`), then filesystem/search and the
-  remaining x64 exception/unwind APIs.
+- [ ] Remaining launcher imports: finish the module-query cluster
+  (`GetModuleHandleExW`, `GetProcAddress`, and `RtlPcToFileHeader`), then
+  filesystem/search and the remaining x64 exception/unwind APIs.
 - [ ] Registry overlay stored inside a SadLayer prefix.
 
 Exit gate: purpose-built PE conformance programs pass file, memory, threading,

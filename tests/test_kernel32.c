@@ -94,6 +94,7 @@ static bool test_export_surface_and_abi(void) {
         "GetCPInfo",             "MultiByteToWideChar",
         "WideCharToMultiByte",   "GetCommandLineA",
         "GetCommandLineW",       "GetEnvironmentStringsW",
+        "GetModuleHandleW",      "GetModuleFileNameW",
         "FreeEnvironmentStringsW", "GetStringTypeW",
         "LCMapStringW",          "GetFileType",
         "GetStdHandle",          "SetStdHandle",

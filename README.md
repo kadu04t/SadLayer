@@ -25,6 +25,8 @@ The bootstrap can already:
   per-page PE protections with a strict W^X check;
 - register mapped PE and native modules, copy explicit module aliases, and
   resolve imports and mixed forwarder chains through the aliased host module;
+- resolve exact PE module handles and mapped-address ownership without
+  fabricating handles for native built-ins or aliases;
 - keep explicitly supplied PE files in an owning module space so their source
   bytes, parsed metadata, and execution-intended mappings remain valid
   together, with per-add rollback on parse, mapping, relocation, or registry
@@ -34,10 +36,10 @@ The bootstrap can already:
   UTF-16 copy of its guest-visible path while keeping `PEB.ImageBaseAddress`
   equal to the main mapping;
 - bind PE32/PE32+ import address tables without partial writes;
-- expose an initial 54-export `KERNEL32.dll` subset through x86-64 `ms_abi`
+- expose an initial 56-export `KERNEL32.dll` subset through x86-64 `ms_abi`
   thunks for last-error state, time/identity, heap, TLS, no-fiber FLS, critical
   sections, text conversion, process strings, locale basics, standard streams,
-  pointer encoding, and process termination;
+  pointer encoding, process-scoped PE module queries, and process termination;
 - create explicit guest process objects with an OS-random pointer cookie used by
   the reversible `EncodePointer`/`DecodePointer` pair;
 - convert explicit-length UTF-8/UTF-16 strictly or with replacement, without
@@ -78,10 +80,14 @@ classified as partial even though its symbols are available.
 
 The adopted module space and main-module/path views are exposed read-only for
 the process lifetime; process destruction releases the path and every owned PE
-mapping. Implementing the launcher's module-query APIs (`GetModuleHandleW`,
-`GetModuleHandleExW`, `GetModuleFileNameW`, `GetProcAddress`, and
-`RtlPcToFileHeader`), recursive DLL loading, complete API Set contract mapping,
-PE TLS, and exception/unwind support are the next loader milestones.
+mapping. `GetModuleHandleW` now returns exact mapped PE bases from the active
+guest process for the main image or a registered basename, and
+`GetModuleFileNameW` exposes that process's copied main-image path with modern
+null-terminated truncation behavior. Full-path module lookup, native built-in
+`HMODULE` values, and filename queries for non-main modules remain unsupported.
+`GetModuleHandleExW`, `GetProcAddress`, `RtlPcToFileHeader`,
+recursive DLL loading, complete API Set contract mapping, PE TLS, and
+exception/unwind support are the next loader milestones.
 See
 [ROADMAP.md](ROADMAP.md) for the ordered compatibility plan and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries.

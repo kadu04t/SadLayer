@@ -448,6 +448,124 @@ static bool test_module_registry_resolution(void) {
     return true;
 }
 
+static bool test_module_registry_handle_and_address_resolution(void) {
+    static const sl_native_export native_export = {
+        .name = "NativeFunction",
+        .guest_address = UINT64_C(0x3000),
+    };
+    uint8_t first_bytes[4] = {0};
+    uint8_t second_bytes[16] = {0};
+    sl_pe_image first_image = {.image_size = 4U};
+    sl_pe_image second_image = {.image_size = 16U};
+    sl_mapped_image first_mapped = {
+        .bytes = first_bytes,
+        .size = sizeof(first_bytes),
+        .load_base = UINT64_C(0x1000),
+    };
+    sl_mapped_image second_mapped = {
+        .bytes = second_bytes,
+        .size = sizeof(second_bytes),
+        .load_base = UINT64_MAX - UINT64_C(15),
+    };
+    sl_module_registry registry;
+    sl_module_registry_init(&registry);
+    CHECK(sl_module_registry_add(&registry, "First.dll", &first_image,
+                                 &first_mapped) == SL_OK);
+    CHECK(sl_module_registry_add(&registry, "Second.dll", &second_image,
+                                 &second_mapped) == SL_OK);
+    CHECK(sl_module_registry_add_native(&registry, "Native.dll",
+                                        &native_export, 1U) == SL_OK);
+    CHECK(sl_module_registry_add_alias(&registry, "api-test.dll",
+                                       "First.dll") == SL_OK);
+
+    const sl_loaded_module *first = &registry.modules[0];
+    const sl_loaded_module *second = &registry.modules[1];
+    const sl_loaded_module *sentinel =
+        (const sl_loaded_module *)(uintptr_t)1U;
+    const sl_loaded_module *resolved = sentinel;
+
+    CHECK(sl_module_registry_resolve_handle(
+              &registry, first_mapped.load_base, &resolved) == SL_OK);
+    CHECK(resolved == first);
+    resolved = sentinel;
+    CHECK(sl_module_registry_resolve_handle(
+              &registry, second_mapped.load_base, &resolved) == SL_OK);
+    CHECK(resolved == second);
+    resolved = sentinel;
+    CHECK(sl_module_registry_resolve_handle(
+              &registry, first_mapped.load_base + 1U, &resolved) ==
+          SL_ERROR_MODULE_NOT_FOUND);
+    CHECK(resolved == sentinel);
+    CHECK(sl_module_registry_resolve_handle(
+              &registry, native_export.guest_address, &resolved) ==
+          SL_ERROR_MODULE_NOT_FOUND);
+    CHECK(resolved == sentinel);
+
+    CHECK(sl_module_registry_resolve_address(
+              &registry, first_mapped.load_base, &resolved) == SL_OK);
+    CHECK(resolved == first);
+    resolved = sentinel;
+    CHECK(sl_module_registry_resolve_address(
+              &registry,
+              first_mapped.load_base + (uint64_t)first_mapped.size - 1U,
+              &resolved) == SL_OK);
+    CHECK(resolved == first);
+    resolved = sentinel;
+    CHECK(sl_module_registry_resolve_address(
+              &registry, first_mapped.load_base - 1U, &resolved) ==
+          SL_ERROR_MODULE_NOT_FOUND);
+    CHECK(resolved == sentinel);
+    CHECK(sl_module_registry_resolve_address(
+              &registry, first_mapped.load_base + (uint64_t)first_mapped.size,
+              &resolved) == SL_ERROR_MODULE_NOT_FOUND);
+    CHECK(resolved == sentinel);
+    CHECK(sl_module_registry_resolve_address(
+              &registry, second_mapped.load_base, &resolved) == SL_OK);
+    CHECK(resolved == second);
+    resolved = sentinel;
+    CHECK(sl_module_registry_resolve_address(&registry, UINT64_MAX,
+                                             &resolved) == SL_OK);
+    CHECK(resolved == second);
+    resolved = sentinel;
+    CHECK(sl_module_registry_resolve_address(
+              &registry, second_mapped.load_base - 1U, &resolved) ==
+          SL_ERROR_MODULE_NOT_FOUND);
+    CHECK(resolved == sentinel);
+    CHECK(sl_module_registry_resolve_address(
+              &registry, native_export.guest_address, &resolved) ==
+          SL_ERROR_MODULE_NOT_FOUND);
+    CHECK(resolved == sentinel);
+
+    const sl_loaded_module *alias_target = sentinel;
+    CHECK(sl_module_registry_resolve_module(&registry, "API-TEST.DLL",
+                                            &alias_target) == SL_OK);
+    CHECK(alias_target == first);
+    CHECK(registry.count == 3U && registry.alias_count == 1U);
+
+    CHECK(sl_module_registry_resolve_handle(NULL, first_mapped.load_base,
+                                            &resolved) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(resolved == sentinel);
+    CHECK(sl_module_registry_resolve_handle(&registry, 0U, &resolved) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(resolved == sentinel);
+    CHECK(sl_module_registry_resolve_handle(&registry, first_mapped.load_base,
+                                            NULL) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_module_registry_resolve_address(NULL, first_mapped.load_base,
+                                             &resolved) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(resolved == sentinel);
+    CHECK(sl_module_registry_resolve_address(&registry, 0U, &resolved) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(resolved == sentinel);
+    CHECK(sl_module_registry_resolve_address(&registry,
+                                             first_mapped.load_base,
+                                             NULL) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    return true;
+}
+
 static bool test_module_alias_registry(void) {
     static const sl_native_export exports[] = {
         {.name = "HostSymbol",
@@ -1596,6 +1714,8 @@ int main(void) {
          test_relocation_failures_are_atomic},
         {"find exports", test_export_lookup},
         {"resolve modules and forwarders", test_module_registry_resolution},
+        {"resolve PE handles and addresses",
+         test_module_registry_handle_and_address_resolution},
         {"manage module aliases", test_module_alias_registry},
         {"resolve symbols through module aliases",
          test_module_alias_symbol_resolution},

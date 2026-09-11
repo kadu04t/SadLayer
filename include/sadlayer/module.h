@@ -91,6 +91,17 @@ const sl_loaded_module *sl_module_registry_find(
 sl_status sl_module_registry_resolve_module(
     const sl_module_registry *registry, const char *name,
     const sl_loaded_module **result);
+/*
+ * PE module handles are their exact mapped load bases. Address lookup uses the
+ * half-open mapped image interval. Native modules and aliases have no handle.
+ * result is modified only on success.
+ */
+sl_status sl_module_registry_resolve_handle(
+    const sl_module_registry *registry, uint64_t handle,
+    const sl_loaded_module **result);
+sl_status sl_module_registry_resolve_address(
+    const sl_module_registry *registry, uint64_t address,
+    const sl_loaded_module **result);
 sl_status sl_module_registry_resolve_symbol(
     const sl_module_registry *registry, const sl_module_symbol *symbol,
     sl_resolved_symbol *result);

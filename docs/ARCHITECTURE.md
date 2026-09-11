@@ -32,9 +32,12 @@ guest x86-64 entry point            NT/process object model
   case-insensitive, one-hop aliases to already registered modules; alias chains
   are rejected. It borrows mapped PE images or static native export tables and
   applies the same alias-aware lookup to imports/IAT binding and every step of a
-  bounded mixed PE/native forwarder chain. This provides the routing primitive
-  for API Set contracts but does not read `ApiSetSchema`, select a host by
-  version, or populate target-specific mappings.
+  bounded mixed PE/native forwarder chain. Exact-handle lookup treats a PE's
+  mapping base as its `HMODULE`, and address lookup uses the mapped image's
+  half-open interval; neither aliases nor native built-ins receive handles.
+  This provides the routing primitive for API Set contracts but does not read
+  `ApiSetSchema`, select a host by version, or populate target-specific
+  mappings.
 - `module_space`: is the first ownership layer above the registry. It copies
   each explicitly supplied PE file, parses and maps it into stable per-entry
   storage, and publishes the borrowed registry pointers only after the entire
@@ -70,8 +73,14 @@ guest x86-64 entry point            NT/process object model
   worker installs the TEB base in GS only around guest execution and verifies
   restoration before releasing it.
 - `kernel32`: provides the first host-backed x86-64 `ms_abi` thunks. Current
-  coverage is a bootstrap subset backed by the minimal PEB/TEB layouts, but it
-  does not yet constitute a complete object, filesystem, or exception runtime.
+  coverage is a 56-export bootstrap subset backed by the minimal PEB/TEB
+  layouts. `GetModuleHandleW` resolves the main image or registered PE
+  basenames only inside the installed process context; path-bearing names are
+  rejected until the catalog owns canonical paths for every DLL.
+  `GetModuleFileNameW` returns the process-owned main-image path and implements
+  modern null-terminated truncation. Native built-ins intentionally have no
+  `HMODULE`, and the subset does not yet constitute a complete loader, object,
+  filesystem, or exception runtime.
 - `win32`: defines the x86-64 calling-convention marker and identifies planned
   bootstrap module names.
 - CLI: owns files, prints target inventory, and exposes individual loader gates.
@@ -102,8 +111,9 @@ Tests construct redistributable PE-shaped fixtures in memory.
 3. The module registry resolves symbols to process addresses. Native modules are
    responsible for exact `ms_abi` signatures and fixed-width Windows types;
    validated guest-pointer access remains a separate runtime boundary.
-4. Windows object handles are SadLayer-managed identifiers, not leaked Linux file
-   descriptors or pointers.
+4. Windows object handles are SadLayer-managed identifiers, not leaked Linux
+   file descriptors or pointers. `HMODULE` is the deliberate PE exception: it
+   is the image's mapped base, matching the guest-visible loader identity.
 5. UTF-16 and Windows path semantics terminate at the NT layer; backends receive
    normalized internal values.
 6. Every unsupported API is attributable by module, symbol, caller, and chosen
