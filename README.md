@@ -36,10 +36,11 @@ The bootstrap can already:
   UTF-16 copy of its guest-visible path while keeping `PEB.ImageBaseAddress`
   equal to the main mapping;
 - bind PE32/PE32+ import address tables without partial writes;
-- expose an initial 61-export `KERNEL32.dll` subset through x86-64 `ms_abi`
+- expose an initial 68-export `KERNEL32.dll` subset through x86-64 `ms_abi`
   thunks for last-error state, time/identity, heap, TLS, no-fiber FLS, critical
   sections, text conversion, process strings, locale basics, standard streams,
-  pointer encoding, process-scoped PE module queries, and process termination;
+  pointer encoding, process-scoped PE module queries, static x64
+  exception/unwind dispatch, and process termination;
 - create explicit guest process objects with an OS-random pointer cookie used by
   the reversible `EncodePointer`/`DecodePointer` pair;
 - convert explicit-length UTF-8/UTF-16 strictly or with replacement, without
@@ -47,7 +48,16 @@ The bootstrap can already:
 - install nestable per-thread runtime contexts and route last-error, thread
   identity, TLS, and no-fiber FLS state through them;
 - construct the measured PEB/process-parameters and guarded TEB memory layouts,
-  sharing `TEB+0x68` with the KERNEL32 last-error thunk;
+  sharing `TEB+0x68` with the KERNEL32 last-error thunk and retaining trusted
+  host-side bounds for the guarded guest stack;
+- validate and consume static AMD64 `.pdata`/`UNWIND_INFO` version 1 and 2,
+  including chained records, prologues, declared epilogues, nonvolatile
+  integer/XMM restores, machine frames, first-pass language handlers, and
+  second-pass termination handlers;
+- expose `RtlCaptureContext`, `RtlLookupFunctionEntry`, `RtlVirtualUnwind`,
+  `RtlUnwindEx`, `RaiseException`, `SetUnhandledExceptionFilter`, and
+  `UnhandledExceptionFilter`, with synthetic PE tests covering continuation
+  and a handler-initiated unwind back into guest code;
 - execute a trusted synthetic PE32+ entry point that calls native KERNEL32
   functions through its bound IAT and returns normally to Linux, including a
   process-main entry that cannot be substituted with an unrelated image;
@@ -94,7 +104,11 @@ mapping resident.
 null-terminated truncation behavior. Full-path module lookup, native built-in
 `HMODULE` values, filename queries for non-main modules, DLL discovery/loading
 from disk, per-module reference counts and unloading, complete API Set contract
-mapping, PE TLS, and exception/unwind support remain future loader milestones.
+mapping, and PE TLS remain future loader milestones. Exception/unwind support
+is deliberately limited to immutable PE tables and explicit dispatch: dynamic
+or JIT function tables, signal-to-SEH translation, nested/collided and exit
+unwinds, history-table caching, and the special long-jump/consolidation restore
+paths are not implemented yet.
 See
 [ROADMAP.md](ROADMAP.md) for the ordered compatibility plan and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries.

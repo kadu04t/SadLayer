@@ -20,6 +20,7 @@
 
 struct sl_win32_process {
     atomic_uint active_references;
+    atomic_uintptr_t unhandled_exception_filter;
     uintptr_t pointer_cookie;
     sl_module_space *module_space;
     const sl_loaded_module *main_module;
@@ -74,6 +75,7 @@ sl_status sl_win32_process_create(sl_win32_process **out_process) {
         return SL_ERROR_OUT_OF_MEMORY;
     }
     atomic_init(&process->active_references, 0U);
+    atomic_init(&process->unhandled_exception_filter, 0U);
 
     sl_status status;
     do {
@@ -328,4 +330,22 @@ uintptr_t sl_win32_process_decode_pointer(const sl_win32_process *process,
     const unsigned int shift =
         (unsigned int)(process->pointer_cookie & (uintptr_t)(width - 1U));
     return rotate_left(pointer, shift) ^ process->pointer_cookie;
+}
+
+uintptr_t sl_win32_process_exchange_unhandled_exception_filter(
+    sl_win32_process *process, uintptr_t filter) {
+    if (process == NULL) {
+        abort();
+    }
+    return atomic_exchange_explicit(&process->unhandled_exception_filter,
+                                    filter, memory_order_acq_rel);
+}
+
+uintptr_t sl_win32_process_unhandled_exception_filter(
+    const sl_win32_process *process) {
+    if (process == NULL) {
+        abort();
+    }
+    return atomic_load_explicit(&process->unhandled_exception_filter,
+                                memory_order_acquire);
 }

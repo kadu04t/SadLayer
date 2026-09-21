@@ -58,6 +58,8 @@ guest x86-64 entry point            NT/process object model
   supplied with an explicit length into process-owned terminated storage. The
   same operation writes the main mapping base to `PEB.ImageBaseAddress`; later
   manual image-base changes cannot contradict the adopted main module.
+  It also owns the atomically replaceable top-level exception filter used by
+  explicit guest exception dispatch.
   Module-space, main-module, and path getters are borrowed read-only views valid
   for the retained process lifetime. General handles and recursive loader state
   remain future work.
@@ -69,11 +71,13 @@ guest x86-64 entry point            NT/process object model
   TEBs, and active scopes have exited.
 - `teb`: allocates two writable TEB pages between guard pages and materializes
   the launcher-observed stack, identity, PEB, and last-error offsets. The PE TLS
-  vector remains null until the loader owns module TLS. The isolated runtime
+  vector remains null until the loader owns module TLS. Trusted host-side stack
+  bounds accompany the guest-visible NT_TIB values so unwind code never trusts
+  writable guest metadata while dereferencing frames. The isolated runtime
   worker installs the TEB base in GS only around guest execution and verifies
   restoration before releasing it.
 - `kernel32`: provides the first host-backed x86-64 `ms_abi` thunks. Current
-  coverage is a 61-export bootstrap subset backed by the minimal PEB/TEB
+  coverage is a 68-export bootstrap subset backed by the minimal PEB/TEB
   layouts. Module queries resolve only inside the installed process context.
   `GetModuleHandleW` and `GetModuleHandleExW` expose the main image or
   registered PE basenames; the latter can also identify a module by an address
@@ -90,8 +94,22 @@ guest x86-64 entry point            NT/process object model
   `GetModuleFileNameW` returns the process-owned main-image path and implements
   modern null-terminated truncation. Native built-ins intentionally have no
   `HMODULE`; disk discovery, reference counts, unload, and `DllMain` remain
-  outside this facade. The subset does not yet constitute a complete loader,
-  object, filesystem, or exception runtime.
+  outside this facade. Seven exception exports connect explicit raises,
+  process-local unhandled filtering, function lookup, virtual unwind, and
+  second-pass unwind/context restoration to the static PE unwind engine. The
+  subset does not yet constitute a complete loader, object, filesystem, or
+  general exception runtime.
+- `win64_unwind`: defines byte-exact AMD64 Windows exception/context layouts,
+  captures and restores CPU context through assembly gateways, validates
+  immutable PE exception directories, and transactionally interprets version-1
+  and version-2 unwind records. It supports chained records, prologue and
+  declared-epilogue states, saved nonvolatile integer/XMM registers, machine
+  frames, first-pass exception handlers, and second-pass termination handlers.
+  A protected host-side handler link lets a guest handler call `RtlUnwindEx`
+  without exposing SadLayer's SysV frames to the Windows unwinder. Dynamic/JIT
+  function tables, signals translated into SEH, nested/collided or exit unwind,
+  history caching, and special consolidate/long-jump restore semantics remain
+  outside this component.
 - `win32`: defines the x86-64 calling-convention marker and identifies planned
   bootstrap module names.
 - CLI: owns files, prints target inventory, and exposes individual loader gates.

@@ -35,5 +35,8 @@ sl_status sl_win32_thread_attach_teb(sl_win32_thread_context *thread,
                                      sl_win32_teb *teb);
 sl_status sl_win32_thread_detach_teb(sl_win32_thread_context *thread,
                                      sl_win32_teb *teb);
+sl_status sl_win32_thread_stack_bounds(
+    const sl_win32_thread_context *thread, uintptr_t *stack_limit,
+    uintptr_t *stack_base);
 
 #endif

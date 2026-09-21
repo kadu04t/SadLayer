@@ -64,4 +64,10 @@ uintptr_t sl_win32_process_encode_pointer(const sl_win32_process *process,
 uintptr_t sl_win32_process_decode_pointer(const sl_win32_process *process,
                                           uintptr_t pointer);
 
+/* Process-wide top-level filter shared by every current and future thread. */
+uintptr_t sl_win32_process_exchange_unhandled_exception_filter(
+    sl_win32_process *process, uintptr_t filter);
+uintptr_t sl_win32_process_unhandled_exception_filter(
+    const sl_win32_process *process);
+
 #endif

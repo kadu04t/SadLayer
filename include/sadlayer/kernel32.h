@@ -6,6 +6,7 @@
 
 #include "sadlayer/module_space.h"
 #include "sadlayer/win32.h"
+#include "sadlayer/win64_unwind.h"
 
 #define SL_WIN32_FALSE 0
 #define SL_WIN32_TRUE 1
@@ -110,6 +111,31 @@ void *SL_WINAPI sl_kernel32_get_proc_address(void *module,
                                              const char *procedure_name);
 void *SL_WINAPI sl_kernel32_rtl_pc_to_file_header(const void *program_counter,
                                                    void **image_base);
+void SL_WINAPI sl_kernel32_rtl_capture_context(
+    sl_win64_context *context_record);
+const sl_win64_runtime_function *SL_WINAPI
+sl_kernel32_rtl_lookup_function_entry(
+    uint64_t control_pc, uint64_t *image_base,
+    sl_win64_unwind_history_table *history_table);
+sl_win64_exception_routine SL_WINAPI sl_kernel32_rtl_virtual_unwind(
+    uint32_t handler_type, uint64_t image_base, uint64_t control_pc,
+    const sl_win64_runtime_function *function_entry,
+    sl_win64_context *context_record, void **handler_data,
+    uint64_t *establisher_frame,
+    sl_win64_nonvolatile_context_pointers *context_pointers);
+sl_win64_top_level_exception_filter SL_WINAPI
+sl_kernel32_set_unhandled_exception_filter(
+    sl_win64_top_level_exception_filter filter);
+int32_t SL_WINAPI sl_kernel32_unhandled_exception_filter(
+    sl_win64_exception_pointers *exception_pointers);
+void SL_WINAPI sl_kernel32_raise_exception(
+    uint32_t exception_code, uint32_t exception_flags,
+    uint32_t argument_count, const uint64_t *arguments);
+_Noreturn void SL_WINAPI sl_kernel32_rtl_unwind_ex(
+    void *target_frame, void *target_ip,
+    sl_win64_exception_record *exception_record, void *return_value,
+    sl_win64_context *context_record,
+    sl_win64_unwind_history_table *history_table);
 uint16_t *SL_WINAPI sl_kernel32_get_environment_strings_w(void);
 sl_win32_bool SL_WINAPI sl_kernel32_free_environment_strings_w(
     uint16_t *environment);

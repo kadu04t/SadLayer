@@ -146,6 +146,20 @@ static bool test_teb_layout_and_last_error_alias(void) {
 
     thread.last_error = 35U;
     CHECK(sl_win32_thread_attach_teb(&thread, teb) == SL_OK);
+    uintptr_t reported_limit = 0U;
+    uintptr_t reported_base = 0U;
+    CHECK(sl_win32_thread_stack_bounds(&thread, &reported_limit,
+                                       &reported_base) == SL_OK);
+    CHECK(reported_limit == stack_limit && reported_base == stack_base);
+    uintptr_t forged_limit = UINT64_C(0x1000);
+    uintptr_t forged_base = UINTPTR_MAX;
+    memcpy(base + SL_WIN32_TEB_STACK_LIMIT_OFFSET, &forged_limit,
+           sizeof(forged_limit));
+    memcpy(base + SL_WIN32_TEB_STACK_BASE_OFFSET, &forged_base,
+           sizeof(forged_base));
+    CHECK(sl_win32_thread_stack_bounds(&thread, &reported_limit,
+                                       &reported_base) == SL_OK);
+    CHECK(reported_limit == stack_limit && reported_base == stack_base);
     CHECK(sl_win32_teb_destroy(teb) == SL_ERROR_INVALID_STATE);
     CHECK(sl_win32_process_destroy(process) == SL_ERROR_INVALID_STATE);
     CHECK(thread.teb == base);

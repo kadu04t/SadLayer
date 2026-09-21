@@ -26,11 +26,22 @@ link check against the profiled files resolves 58 symbols and leaves 14
 unresolved. `GetModuleHandleW`, `GetModuleFileNameW`, `GetModuleHandleExW`,
 `GetProcAddress`, and `RtlPcToFileHeader` account for the five-symbol gain over
 the previous 53/19 measurement. Since that reprobe, resident-only
-`LoadLibraryExW` and `FreeLibrary` have joined the built-in surface, so the next
-measurement should reach 60 resolved and 12 unresolved once the target volume
-is available again. The expected remainder is concentrated in x64
-exception/unwind and filesystem search/file positioning. IAT binding remains
-intentionally skipped until the entire launcher import set resolves atomically.
+`LoadLibraryExW`/`FreeLibrary` and seven x64 exception/unwind exports have joined
+the built-in surface. The next measurement should therefore reach 67 resolved
+and 5 unresolved once the Windows target files are available again. This is a
+projection, not a new measurement. The expected remainder is `FindClose`,
+`FindFirstFileExW`, `FindNextFileW`, `SetFilePointerEx`, and `CreateFileW`. IAT
+binding remains intentionally skipped until the entire launcher import set
+resolves atomically.
+
+The profiled exception directories contain 323 runtime-function entries with
+137 distinct unwind records in the launcher and 103,587 entries with 67,501
+distinct records in `UnityPlayer.dll`. Each image has four version-2 functions
+sharing two version-2 records; measured chain depth reaches one in the launcher
+and six in UnityPlayer, with no indirect runtime-function entries. SadLayer now
+validates and interprets those static v1/v2 and chained forms. Dynamic function
+tables, signal-to-SEH translation, nested/collided and exit unwinds, and special
+long-jump/consolidation restores remain unsupported.
 
 The launcher's CRT path reads `GS:[0x30]` and `GS:[0x60]` before reaching
 `UnityMain2`, then consumes TEB stack bounds and PEB process parameters. A
@@ -67,9 +78,9 @@ The execution mapper now reserves this launcher at `0x140000000` on the profiled
 host, applies its final page protections, and identifies the entry address as
 `0x140001264`. SadLayer still does not transfer control to it: the remaining
 launcher imports, recursive UnityPlayer dependency binding, initialization
-order, API Set routing, PE TLS, and exception/unwind support are explicit gates.
-The next launcher-specific work is recursive module discovery/loading,
-filesystem/search, and the remaining x64 exception/unwind surface.
+order, API Set routing, and PE TLS are explicit gates. The next
+launcher-specific work is the five filesystem/search imports followed by
+recursive module discovery/loading.
 
 ## Direct UnityPlayer modules
 

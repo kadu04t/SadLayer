@@ -17,6 +17,8 @@
 struct sl_win32_teb {
     sl_win32_process *process;
     sl_win32_thread_context *thread;
+    uintptr_t stack_limit;
+    uintptr_t stack_base;
     bool attached;
     uint8_t *mapping;
     size_t mapping_size;
@@ -120,6 +122,8 @@ sl_status sl_win32_teb_create(sl_win32_thread_context *thread,
     }
     teb->process = process;
     teb->thread = thread;
+    teb->stack_limit = stack_limit;
+    teb->stack_base = stack_base;
 
     store_uintptr(teb->bytes + SL_WIN32_TEB_STACK_BASE_OFFSET, stack_base);
     store_uintptr(teb->bytes + SL_WIN32_TEB_STACK_LIMIT_OFFSET, stack_limit);
@@ -232,5 +236,27 @@ sl_status sl_win32_thread_detach_teb(sl_win32_thread_context *thread,
     thread->teb = NULL;
     teb->attached = false;
     sl_win32_context_release_inactive(thread);
+    return SL_OK;
+}
+
+sl_status sl_win32_thread_stack_bounds(
+    const sl_win32_thread_context *thread, uintptr_t *stack_limit,
+    uintptr_t *stack_base) {
+    if (thread == NULL || stack_limit == NULL || stack_base == NULL ||
+        thread->teb == NULL) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    uintptr_t owner = atomic_load_explicit(&thread->teb_owner_token,
+                                           memory_order_acquire);
+    if (owner == 0U || owner == SL_TEB_OWNERSHIP_RESERVED) {
+        return SL_ERROR_INVALID_STATE;
+    }
+    const sl_win32_teb *teb = (const sl_win32_teb *)owner;
+    if (!teb->attached || teb->thread != thread || teb->bytes != thread->teb ||
+        teb->stack_limit >= teb->stack_base) {
+        return SL_ERROR_INVALID_STATE;
+    }
+    *stack_limit = teb->stack_limit;
+    *stack_base = teb->stack_base;
     return SL_OK;
 }

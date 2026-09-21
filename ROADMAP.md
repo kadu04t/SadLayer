@@ -104,13 +104,19 @@ Implement the minimum coherent process model rather than isolated stubs:
 - [x] Resident-only dynamic-module facade: `LoadLibraryExW` reacquires an
   already adopted PE for the default or measured System32-search request, and
   `FreeLibrary` validates the process-local handle without unloading it.
+- [x] Static AMD64 exception-directory lookup and transactional version-1/
+  version-2 unwind, including chained metadata, prologue/epilogue handling,
+  saved integer/XMM state, and machine frames.
+- [x] Explicit `RaiseException` first-pass dispatch, process-local unhandled
+  filter, two-pass `RtlUnwindEx`, and context restoration, exercised through
+  PE-resident handlers and bound KERNEL32 imports.
 - [ ] PE TLS directory/callbacks, validated guest pointers, and coherent
   handles/object lifetimes.
 - [ ] Fiber contexts and process-wide FLS callback enumeration.
 - [ ] Current directory, Windows path normalization, virtual memory, files,
   directories, mappings, waits, synchronization objects, and threads.
-- [ ] Remaining launcher imports: recursive module discovery/loading,
-  filesystem/search, and the remaining x64 exception/unwind APIs.
+- [ ] Remaining launcher imports: recursive module discovery/loading and the
+  five filesystem search/file-positioning APIs.
 - [ ] Registry overlay stored inside a SadLayer prefix.
 
 Exit gate: purpose-built PE conformance programs pass file, memory, threading,
@@ -126,11 +132,12 @@ TLS, timing, environment, and loader tests under SadLayer.
    and prove that a guard-page signal leaves the parent runtime usable.
 4. [x] Capture fixed-format register/fault context from an alternate signal
    stack before the worker exits.
-5. [ ] Complete the launcher's remaining KERNEL32 imports through coherent
-   module, handle/filesystem, and x64 exception/unwind subsystems.
-6. [ ] Recursively load, relocate, and bind UnityPlayer and its dependency
+5. [x] Implement the launcher's static x64 exception/unwind surface, including
+   guest-handler continuation and handler-initiated second-pass unwind.
+6. [ ] Complete the launcher's remaining KERNEL32 filesystem/search imports.
+7. [ ] Recursively load, relocate, and bind UnityPlayer and its dependency
    graph; the current link check only examines the executable.
-7. [ ] Populate real API Set contract mappings—the manual alias primitive is
+8. [ ] Populate real API Set contract mappings—the manual alias primitive is
    only plumbing—and implement DLL initialization order, `DllMain`, PE TLS
    data, and TLS callbacks.
 

@@ -3,6 +3,7 @@
 #include "sadlayer/context.h"
 #include "sadlayer/kernel32.h"
 #include "sadlayer/process.h"
+#include "sadlayer/teb.h"
 #include "sadlayer/unicode.h"
 
 #include <limits.h>
@@ -628,6 +629,27 @@ static const sl_win32_process *current_process(void) {
     return process;
 }
 
+static sl_win64_stack_bounds current_stack_bounds(void) {
+    sl_win32_thread_context *thread = sl_win32_context_current();
+    uintptr_t stack_limit = 0U;
+    uintptr_t stack_base = 0U;
+    if (sl_win32_thread_stack_bounds(thread, &stack_limit, &stack_base) !=
+        SL_OK) {
+        abort();
+    }
+    return (sl_win64_stack_bounds){
+        .limit = (uint64_t)stack_limit,
+        .base = (uint64_t)stack_base,
+    };
+}
+
+static bool stack_frame_is_valid(const sl_win64_stack_bounds *stack,
+                                 uint64_t frame) {
+    return stack != NULL && stack->limit < stack->base &&
+           frame >= stack->limit && frame < stack->base &&
+           (frame & UINT64_C(7)) == 0U && frame <= UINTPTR_MAX;
+}
+
 static void *SL_WINAPI sl_kernel32_encode_pointer(void *pointer) {
     uintptr_t encoded = sl_win32_process_encode_pointer(
         current_process(), (uintptr_t)pointer);
@@ -924,6 +946,247 @@ void *SL_WINAPI sl_kernel32_rtl_pc_to_file_header(
     }
     *image_base = (void *)(uintptr_t)module->mapped->load_base;
     return *image_base;
+}
+
+const sl_win64_runtime_function *SL_WINAPI
+sl_kernel32_rtl_lookup_function_entry(
+    uint64_t control_pc, uint64_t *image_base,
+    sl_win64_unwind_history_table *history_table) {
+    (void)history_table;
+    if (image_base == NULL) {
+        return NULL;
+    }
+    *image_base = 0U;
+    const sl_module_registry *registry = current_module_registry();
+    const sl_win64_runtime_function *function_entry = NULL;
+    const sl_loaded_module *module = NULL;
+    uint64_t resolved_image_base = 0U;
+    if (sl_win64_lookup_function_entry(
+            registry, control_pc, &resolved_image_base, &function_entry,
+            &module) != SL_OK) {
+        return NULL;
+    }
+    (void)module;
+    *image_base = resolved_image_base;
+    return function_entry;
+}
+
+sl_win64_exception_routine SL_WINAPI sl_kernel32_rtl_virtual_unwind(
+    uint32_t handler_type, uint64_t image_base, uint64_t control_pc,
+    const sl_win64_runtime_function *function_entry,
+    sl_win64_context *context_record, void **handler_data,
+    uint64_t *establisher_frame,
+    sl_win64_nonvolatile_context_pointers *context_pointers) {
+    const sl_module_registry *registry = current_module_registry();
+    const sl_loaded_module *module = NULL;
+    if (registry == NULL ||
+        sl_module_registry_resolve_handle(registry, image_base, &module) !=
+            SL_OK) {
+        abort();
+    }
+    const sl_win64_stack_bounds stack = current_stack_bounds();
+    sl_win64_exception_routine handler = NULL;
+    if (sl_win64_virtual_unwind(
+            module, handler_type, control_pc, function_entry, context_record,
+            &stack, handler_data, establisher_frame, context_pointers,
+            &handler) != SL_OK) {
+        abort();
+    }
+    return handler;
+}
+
+sl_win64_top_level_exception_filter SL_WINAPI
+sl_kernel32_set_unhandled_exception_filter(
+    sl_win64_top_level_exception_filter filter) {
+    uintptr_t filter_address = 0U;
+    _Static_assert(sizeof(filter) <= sizeof(filter_address),
+                   "top-level filter pointer does not fit uintptr_t");
+    memcpy(&filter_address, &filter, sizeof(filter));
+    uintptr_t previous_address =
+        sl_win32_process_exchange_unhandled_exception_filter(
+            (sl_win32_process *)current_process(), filter_address);
+    sl_win64_top_level_exception_filter previous = NULL;
+    memcpy(&previous, &previous_address, sizeof(previous));
+    return previous;
+}
+
+int32_t SL_WINAPI sl_kernel32_unhandled_exception_filter(
+    sl_win64_exception_pointers *exception_pointers) {
+    uintptr_t filter_address =
+        sl_win32_process_unhandled_exception_filter(current_process());
+    if (filter_address == 0U) {
+        return SL_WIN64_EXCEPTION_EXECUTE_HANDLER;
+    }
+    sl_win64_top_level_exception_filter filter = NULL;
+    _Static_assert(sizeof(filter) <= sizeof(filter_address),
+                   "top-level filter pointer does not fit uintptr_t");
+    memcpy(&filter, &filter_address, sizeof(filter));
+    int32_t disposition = filter(exception_pointers);
+    if (disposition == SL_WIN64_EXCEPTION_CONTINUE_EXECUTION ||
+        disposition == SL_WIN64_EXCEPTION_EXECUTE_HANDLER) {
+        return disposition;
+    }
+    return SL_WIN64_EXCEPTION_EXECUTE_HANDLER;
+}
+
+static bool dispatch_raised_exception(
+    sl_win64_exception_record *exception_record,
+    sl_win64_context *original_context,
+    const sl_win64_stack_bounds *stack) {
+    const sl_module_registry *registry = current_module_registry();
+    sl_win64_context walking_context = *original_context;
+    const uint32_t dispatch_flags =
+        exception_record->exception_flags &
+        SL_WIN64_EXCEPTION_NONCONTINUABLE;
+    exception_record->exception_flags = dispatch_flags;
+    for (size_t depth = 0U; registry != NULL && depth < 256U; ++depth) {
+        const sl_loaded_module *containing_module = NULL;
+        if (sl_module_registry_resolve_address(
+                registry, walking_context.rip, &containing_module) != SL_OK) {
+            break;
+        }
+
+        uint64_t image_base = 0U;
+        const sl_win64_runtime_function *function_entry = NULL;
+        const sl_loaded_module *function_module = NULL;
+        sl_status lookup_status = sl_win64_lookup_function_entry(
+            registry, walking_context.rip, &image_base, &function_entry,
+            &function_module);
+        if (lookup_status == SL_ERROR_ADDRESS_OUT_OF_RANGE) {
+            uint64_t previous_rsp = walking_context.rsp;
+            if (sl_win64_unwind_leaf(&walking_context, stack) != SL_OK ||
+                walking_context.rsp <= previous_rsp) {
+                return false;
+            }
+            continue;
+        }
+        if (lookup_status != SL_OK || function_module != containing_module) {
+            return false;
+        }
+
+        uint64_t control_pc = walking_context.rip;
+        sl_win64_context caller_context = walking_context;
+        void *handler_data = NULL;
+        uint64_t establisher_frame = 0U;
+        sl_win64_exception_routine language_handler = NULL;
+        if (sl_win64_virtual_unwind(
+                function_module, SL_WIN64_UNW_FLAG_EHANDLER, control_pc,
+                function_entry, &caller_context, stack, &handler_data,
+                &establisher_frame, NULL, &language_handler) != SL_OK ||
+            caller_context.rsp <= walking_context.rsp ||
+            !stack_frame_is_valid(stack, establisher_frame)) {
+            return false;
+        }
+
+        if (language_handler != NULL) {
+            sl_win64_dispatcher_context dispatcher = {
+                .control_pc = control_pc,
+                .image_base = image_base,
+                .function_entry = function_entry,
+                .establisher_frame = establisher_frame,
+                .target_ip = 0U,
+                .context_record = &caller_context,
+                .language_handler = language_handler,
+                .handler_data = handler_data,
+                .history_table = NULL,
+                .scope_index = 0U,
+                .fill0 = 0U,
+            };
+            exception_record->exception_flags = dispatch_flags;
+            int32_t disposition = sl_win64_execute_handler(
+                language_handler, exception_record, establisher_frame,
+                original_context, &dispatcher, &walking_context);
+            exception_record->exception_flags = dispatch_flags;
+            if (disposition ==
+                SL_WIN64_EXCEPTION_DISPOSITION_CONTINUE_EXECUTION) {
+                return (exception_record->exception_flags &
+                        SL_WIN64_EXCEPTION_NONCONTINUABLE) == 0U;
+            }
+            if (disposition !=
+                SL_WIN64_EXCEPTION_DISPOSITION_CONTINUE_SEARCH) {
+                /* Nested and collided dispatch need a dedicated state machine. */
+                return false;
+            }
+        }
+        walking_context = caller_context;
+    }
+
+    sl_win64_exception_pointers pointers = {
+        .exception_record = exception_record,
+        .context_record = original_context,
+    };
+    int32_t disposition =
+        sl_kernel32_unhandled_exception_filter(&pointers);
+    exception_record->exception_flags = dispatch_flags;
+    return disposition == SL_WIN64_EXCEPTION_CONTINUE_EXECUTION &&
+           (exception_record->exception_flags &
+            SL_WIN64_EXCEPTION_NONCONTINUABLE) == 0U;
+}
+
+_Noreturn void SL_WINAPI sl_kernel32_raise_exception_dispatch(
+    uint32_t exception_code, uint32_t exception_flags,
+    uint32_t argument_count, const uint64_t *arguments,
+    sl_win64_context *context_record) {
+    if (context_record == NULL) {
+        abort();
+    }
+    sl_win64_exception_record record = {
+        .exception_code = exception_code,
+        .exception_flags =
+            exception_flags & SL_WIN64_EXCEPTION_NONCONTINUABLE,
+        .exception_record = NULL,
+        .exception_address = (void *)(uintptr_t)context_record->rip,
+        .number_parameters = 0U,
+        .alignment = 0U,
+    };
+    if (arguments != NULL) {
+        uint32_t count = argument_count;
+        if (count > SL_WIN64_EXCEPTION_MAXIMUM_PARAMETERS) {
+            count = SL_WIN64_EXCEPTION_MAXIMUM_PARAMETERS;
+        }
+        record.number_parameters = count;
+        memcpy(record.exception_information, arguments,
+               (size_t)count * sizeof(record.exception_information[0]));
+    }
+
+    const sl_win64_stack_bounds stack = current_stack_bounds();
+    if (!dispatch_raised_exception(&record, context_record, &stack)) {
+        abort();
+    }
+    sl_win64_restore_context(context_record);
+}
+
+_Noreturn void SL_WINAPI sl_kernel32_rtl_unwind_ex_dispatch(
+    void *target_frame, void *target_ip,
+    sl_win64_exception_record *exception_record, void *return_value,
+    sl_win64_context *context_record,
+    sl_win64_unwind_history_table *history_table) {
+    if (context_record == NULL) {
+        abort();
+    }
+    (void)sl_win64_take_handler_unwind_origin(context_record);
+    sl_win64_exception_record local_record = {
+        .exception_code = SL_WIN64_STATUS_UNWIND,
+        .exception_flags = 0U,
+        .exception_record = NULL,
+        .exception_address = (void *)(uintptr_t)context_record->rip,
+        .number_parameters = 0U,
+        .alignment = 0U,
+    };
+    sl_win64_exception_record *record =
+        exception_record == NULL ? &local_record : exception_record;
+    const sl_module_registry *registry = current_module_registry();
+    const sl_win64_stack_bounds stack = current_stack_bounds();
+    sl_win64_context target_context;
+    if (sl_win64_unwind_to_frame(
+            registry, (uint64_t)(uintptr_t)target_frame,
+            (uint64_t)(uintptr_t)target_ip, record,
+            (uint64_t)(uintptr_t)return_value, context_record, history_table,
+            &stack, &target_context) != SL_OK) {
+        abort();
+    }
+    *context_record = target_context;
+    sl_win64_restore_context(context_record);
 }
 
 static uint32_t SL_WINAPI sl_kernel32_get_acp(void) { return 1252U; }
@@ -2069,6 +2332,20 @@ static void initialize_kernel32_exports(void) {
                   sl_kernel32_get_proc_address);
     SL_ADD_EXPORT(exports, export_count, "RtlPcToFileHeader",
                   sl_kernel32_rtl_pc_to_file_header);
+    SL_ADD_EXPORT(exports, export_count, "RtlCaptureContext",
+                  sl_kernel32_rtl_capture_context);
+    SL_ADD_EXPORT(exports, export_count, "RtlLookupFunctionEntry",
+                  sl_kernel32_rtl_lookup_function_entry);
+    SL_ADD_EXPORT(exports, export_count, "RtlVirtualUnwind",
+                  sl_kernel32_rtl_virtual_unwind);
+    SL_ADD_EXPORT(exports, export_count, "RtlUnwindEx",
+                  sl_kernel32_rtl_unwind_ex);
+    SL_ADD_EXPORT(exports, export_count, "SetUnhandledExceptionFilter",
+                  sl_kernel32_set_unhandled_exception_filter);
+    SL_ADD_EXPORT(exports, export_count, "UnhandledExceptionFilter",
+                  sl_kernel32_unhandled_exception_filter);
+    SL_ADD_EXPORT(exports, export_count, "RaiseException",
+                  sl_kernel32_raise_exception);
     SL_ADD_EXPORT(exports, export_count, "GetEnvironmentStringsW",
                   sl_kernel32_get_environment_strings_w);
     SL_ADD_EXPORT(exports, export_count, "FreeEnvironmentStringsW",
