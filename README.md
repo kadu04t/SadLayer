@@ -42,7 +42,8 @@ The bootstrap can already:
   pointer encoding, process-scoped PE module queries, static x64
   exception/unwind dispatch, and process termination;
 - create explicit guest process objects with an OS-random pointer cookie used by
-  the reversible `EncodePointer`/`DecodePointer` pair;
+  the reversible `EncodePointer`/`DecodePointer` pair and isolated standard-
+  handle slots for `GetStdHandle`/`SetStdHandle`;
 - maintain a process-owned typed handle table whose tagged generation/slot
   tokens reject stale and wrong-kind access, while reference-counted leases keep
   an object alive when close races an operation; this is internal plumbing for

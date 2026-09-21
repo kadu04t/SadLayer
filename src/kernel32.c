@@ -131,9 +131,6 @@ static _Thread_local sl_win32_local_value
 static atomic_uint_least32_t sl_next_thread_id = ATOMIC_VAR_INIT(1U);
 static sl_local_slot sl_tls_slots[SL_LOCAL_SLOT_COUNT];
 static sl_local_slot sl_fls_slots[SL_LOCAL_SLOT_COUNT];
-static atomic_uintptr_t sl_standard_input = ATOMIC_VAR_INIT(SL_STDIN_HANDLE);
-static atomic_uintptr_t sl_standard_output = ATOMIC_VAR_INIT(SL_STDOUT_HANDLE);
-static atomic_uintptr_t sl_standard_error = ATOMIC_VAR_INIT(SL_STDERR_HANDLE);
 static char sl_command_line_a[SL_COMMAND_LINE_CAPACITY];
 static uint16_t sl_command_line_w[SL_COMMAND_LINE_CAPACITY];
 static once_flag sl_environment_lock_once = ONCE_FLAG_INIT;
@@ -615,7 +612,7 @@ static void SL_WINAPI sl_kernel32_initialize_slist_head(void *list_head) {
     }
 }
 
-static const sl_win32_process *current_process_if_installed(void) {
+static sl_win32_process *current_process_if_installed(void) {
     sl_win32_thread_context *thread = sl_win32_context_current();
     return thread == NULL ? NULL : thread->process;
 }
@@ -2017,36 +2014,54 @@ static sl_win32_bool SL_WINAPI sl_kernel32_get_cp_info(uint32_t page,
     return SL_WIN32_TRUE;
 }
 
-static atomic_uintptr_t *atomic_standard_handle_slot(uint32_t identifier) {
+static bool standard_handle_from_identifier(
+    uint32_t identifier, sl_win32_standard_handle *which) {
     if (identifier == SL_STD_INPUT_ID) {
-        return &sl_standard_input;
+        *which = SL_WIN32_STANDARD_INPUT;
+        return true;
     }
     if (identifier == SL_STD_OUTPUT_ID) {
-        return &sl_standard_output;
+        *which = SL_WIN32_STANDARD_OUTPUT;
+        return true;
     }
     if (identifier == SL_STD_ERROR_ID) {
-        return &sl_standard_error;
+        *which = SL_WIN32_STANDARD_ERROR;
+        return true;
     }
-    return NULL;
+    return false;
 }
 
 static void *SL_WINAPI sl_kernel32_get_std_handle(uint32_t identifier) {
-    atomic_uintptr_t *slot = atomic_standard_handle_slot(identifier);
-    if (slot == NULL) {
+    sl_win32_standard_handle which;
+    if (!standard_handle_from_identifier(identifier, &which)) {
         sl_last_error = SL_ERROR_INVALID_PARAMETER;
         return (void *)UINTPTR_MAX;
     }
-    return (void *)atomic_load_explicit(slot, memory_order_relaxed);
+    sl_win32_process *process = current_process_if_installed();
+    uintptr_t handle = 0U;
+    if (process == NULL ||
+        sl_win32_process_get_standard_handle(process, which, &handle) !=
+            SL_OK) {
+        sl_last_error = SL_ERROR_INVALID_HANDLE;
+        return (void *)UINTPTR_MAX;
+    }
+    return (void *)handle;
 }
 
 static sl_win32_bool SL_WINAPI sl_kernel32_set_std_handle(uint32_t identifier,
                                                            void *handle) {
-    atomic_uintptr_t *slot = atomic_standard_handle_slot(identifier);
-    if (slot == NULL) {
+    sl_win32_standard_handle which;
+    if (!standard_handle_from_identifier(identifier, &which)) {
         sl_last_error = SL_ERROR_INVALID_PARAMETER;
         return SL_WIN32_FALSE;
     }
-    atomic_store_explicit(slot, (uintptr_t)handle, memory_order_relaxed);
+    sl_win32_process *process = current_process_if_installed();
+    if (process == NULL ||
+        sl_win32_process_set_standard_handle(process, which,
+                                             (uintptr_t)handle) != SL_OK) {
+        sl_last_error = SL_ERROR_INVALID_HANDLE;
+        return SL_WIN32_FALSE;
+    }
     return SL_WIN32_TRUE;
 }
 
@@ -2055,12 +2070,10 @@ static FILE *stream_for_handle(const void *handle) {
     if (value == 0U || value == UINTPTR_MAX) {
         return NULL;
     }
-    if (value == atomic_load_explicit(&sl_standard_output,
-                                     memory_order_relaxed)) {
+    if (value == SL_STDOUT_HANDLE) {
         return stdout;
     }
-    if (value == atomic_load_explicit(&sl_standard_error,
-                                     memory_order_relaxed)) {
+    if (value == SL_STDERR_HANDLE) {
         return stderr;
     }
     return NULL;
@@ -2141,9 +2154,7 @@ static sl_win32_bool SL_WINAPI sl_kernel32_write_console_w(
 
 static sl_win32_bool SL_WINAPI sl_kernel32_get_console_mode(void *handle,
                                                              uint32_t *mode) {
-    bool is_input =
-        (uintptr_t)handle ==
-        atomic_load_explicit(&sl_standard_input, memory_order_relaxed);
+    bool is_input = (uintptr_t)handle == SL_STDIN_HANDLE;
     if ((stream_for_handle(handle) == NULL && !is_input) || mode == NULL) {
         sl_last_error = mode == NULL ? SL_ERROR_INVALID_PARAMETER
                                      : SL_ERROR_INVALID_HANDLE;
@@ -2155,8 +2166,7 @@ static sl_win32_bool SL_WINAPI sl_kernel32_get_console_mode(void *handle,
 
 static uint32_t SL_WINAPI sl_kernel32_get_file_type(void *handle) {
     if (stream_for_handle(handle) != NULL ||
-        (uintptr_t)handle ==
-            atomic_load_explicit(&sl_standard_input, memory_order_relaxed)) {
+        (uintptr_t)handle == SL_STDIN_HANDLE) {
         return 2U; /* FILE_TYPE_CHAR */
     }
     sl_last_error = SL_ERROR_INVALID_HANDLE;

@@ -11,6 +11,12 @@ struct sl_loaded_module;
 struct sl_module_space;
 struct sl_handle_table;
 
+typedef enum {
+    SL_WIN32_STANDARD_INPUT = 0,
+    SL_WIN32_STANDARD_OUTPUT = 1,
+    SL_WIN32_STANDARD_ERROR = 2,
+} sl_win32_standard_handle;
+
 #define SL_WIN32_PEB_IMAGE_BASE_OFFSET 0x10U
 #define SL_WIN32_PEB_PROCESS_PARAMETERS_OFFSET 0x20U
 #define SL_WIN32_PEB_PROCESS_HEAP_OFFSET 0x30U
@@ -56,6 +62,13 @@ const struct sl_loaded_module *sl_win32_process_main_module(
 /* Borrowed mutable table, valid while the process remains alive/retained. */
 struct sl_handle_table *sl_win32_process_handle_table(
     sl_win32_process *process);
+/* Standard-handle values are process-local and are not validated or owned. */
+sl_status sl_win32_process_get_standard_handle(
+    const sl_win32_process *process, sl_win32_standard_handle which,
+    uintptr_t *out_handle);
+sl_status sl_win32_process_set_standard_handle(
+    sl_win32_process *process, sl_win32_standard_handle which,
+    uintptr_t handle);
 sl_status sl_win32_process_main_image_path(
     const sl_win32_process *process, const uint16_t **path,
     size_t *path_length);

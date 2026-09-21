@@ -86,6 +86,9 @@ Implement the minimum coherent process model rather than isolated stubs:
 - [x] Explicit guest process object with an OS-random pointer cookie and
   reversible `EncodePointer`/`DecodePointer` behavior; it can now take ownership
   of one finalized module space, main module, and copied UTF-16 image path.
+- [x] Process-local standard-handle slots with isolated `GetStdHandle`,
+  `SetStdHandle`, and `GetStartupInfoW` views; raw reassigned values are not
+  mistaken for bootstrap console streams.
 - [x] Validated explicit-length UTF-8/UTF-16 conversion primitives.
 - [x] Nestable native thread context for last-error/thread identity and the
   future process object.

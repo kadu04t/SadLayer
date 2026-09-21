@@ -62,13 +62,15 @@ guest x86-64 entry point            NT/process object model
   guest operations are quiescent. Guest filesystem APIs are not connected to
   this internal core yet.
 - `process`: owns stable per-guest process state: an OS-random pointer cookie,
-  typed handle table, minimal PEB, and normalized process-parameters storage.
-  Before any thread or worker retains it, a one-shot operation can transfer in
-  one finalized module space, designate its exact main PE, and copy a validated
-  UTF-16 image path supplied with an explicit length into process-owned
-  terminated storage. The same operation writes the main mapping base to
-  `PEB.ImageBaseAddress`; later manual image-base changes cannot contradict the
-  adopted main module.
+  typed handle table, three atomic standard-handle slots, minimal PEB, and
+  normalized process-parameters storage. Standard-handle values are isolated
+  between processes but remain raw, non-owning values until file objects are
+  connected. Before any thread or worker retains it, a one-shot operation can
+  transfer in one finalized module space, designate its exact main PE, and copy
+  a validated UTF-16 image path supplied with an explicit length into
+  process-owned terminated storage. The same operation writes the main mapping
+  base to `PEB.ImageBaseAddress`; later manual image-base changes cannot
+  contradict the adopted main module.
   It also owns the atomically replaceable top-level exception filter used by
   explicit guest exception dispatch.
   Module-space, main-module, and path getters are borrowed read-only views valid
@@ -105,7 +107,11 @@ guest x86-64 entry point            NT/process object model
   `GetModuleFileNameW` returns the process-owned main-image path and implements
   modern null-terminated truncation. Native built-ins intentionally have no
   `HMODULE`; disk discovery, reference counts, unload, and `DllMain` remain
-  outside this facade. Seven exception exports connect explicit raises,
+  outside this facade. `GetStdHandle`, `SetStdHandle`, and `GetStartupInfoW`
+  read the installed process's isolated slots; only the fixed bootstrap tokens
+  currently identify host console streams, so assigning an arbitrary future
+  file handle cannot accidentally redirect it to `stdout`. Seven exception
+  exports connect explicit raises,
   process-local unhandled filtering, function lookup, virtual unwind, and
   second-pass unwind/context restoration to the static PE unwind engine. The
   subset does not yet constitute a complete loader, object, filesystem, or

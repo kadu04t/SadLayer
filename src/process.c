@@ -18,10 +18,15 @@
 #define SL_PEB_SIZE 0x1000U
 #define SL_PROCESS_PARAMETERS_SIZE 0x1000U
 #define SL_BOOTSTRAP_PROCESS_HEAP_HANDLE ((uintptr_t)4U)
+#define SL_BOOTSTRAP_STANDARD_INPUT_HANDLE ((uintptr_t)1U)
+#define SL_BOOTSTRAP_STANDARD_OUTPUT_HANDLE ((uintptr_t)2U)
+#define SL_BOOTSTRAP_STANDARD_ERROR_HANDLE ((uintptr_t)3U)
+#define SL_STANDARD_HANDLE_COUNT 3U
 
 struct sl_win32_process {
     atomic_uint active_references;
     atomic_uintptr_t unhandled_exception_filter;
+    atomic_uintptr_t standard_handles[SL_STANDARD_HANDLE_COUNT];
     uintptr_t pointer_cookie;
     sl_handle_table *handle_table;
     sl_module_space *module_space;
@@ -34,6 +39,8 @@ struct sl_win32_process {
 
 _Static_assert(sizeof(uintptr_t) == sizeof(uint64_t),
                "SadLayer currently requires 64-bit process pointers");
+_Static_assert(UINTPTR_MAX == ULONG_MAX && ATOMIC_LONG_LOCK_FREE == 2,
+               "cloned process handles require lock-free atomic uintptr_t");
 
 static sl_status random_bytes(void *buffer, size_t size) {
     unsigned char *bytes = buffer;
@@ -78,6 +85,12 @@ sl_status sl_win32_process_create(sl_win32_process **out_process) {
     }
     atomic_init(&process->active_references, 0U);
     atomic_init(&process->unhandled_exception_filter, 0U);
+    atomic_init(&process->standard_handles[SL_WIN32_STANDARD_INPUT],
+                SL_BOOTSTRAP_STANDARD_INPUT_HANDLE);
+    atomic_init(&process->standard_handles[SL_WIN32_STANDARD_OUTPUT],
+                SL_BOOTSTRAP_STANDARD_OUTPUT_HANDLE);
+    atomic_init(&process->standard_handles[SL_WIN32_STANDARD_ERROR],
+                SL_BOOTSTRAP_STANDARD_ERROR_HANDLE);
 
     sl_status status =
         sl_handle_table_create(&process->handle_table);
@@ -284,6 +297,38 @@ const sl_loaded_module *sl_win32_process_main_module(
 
 sl_handle_table *sl_win32_process_handle_table(sl_win32_process *process) {
     return process == NULL ? NULL : process->handle_table;
+}
+
+static bool standard_handle_is_valid(sl_win32_standard_handle which) {
+    return which == SL_WIN32_STANDARD_INPUT ||
+           which == SL_WIN32_STANDARD_OUTPUT ||
+           which == SL_WIN32_STANDARD_ERROR;
+}
+
+sl_status sl_win32_process_get_standard_handle(
+    const sl_win32_process *process, sl_win32_standard_handle which,
+    uintptr_t *out_handle) {
+    if (out_handle != NULL) {
+        *out_handle = 0U;
+    }
+    if (process == NULL || !standard_handle_is_valid(which) ||
+        out_handle == NULL) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    *out_handle = atomic_load_explicit(&process->standard_handles[which],
+                                       memory_order_acquire);
+    return SL_OK;
+}
+
+sl_status sl_win32_process_set_standard_handle(
+    sl_win32_process *process, sl_win32_standard_handle which,
+    uintptr_t handle) {
+    if (process == NULL || !standard_handle_is_valid(which)) {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    atomic_store_explicit(&process->standard_handles[which], handle,
+                          memory_order_release);
+    return SL_OK;
 }
 
 sl_status sl_win32_process_main_image_path(

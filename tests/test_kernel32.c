@@ -20,6 +20,34 @@
         }                                                                      \
     } while (false)
 
+#define TEST_STD_INPUT_ID UINT32_C(0xfffffff6)
+#define TEST_STD_OUTPUT_ID UINT32_C(0xfffffff5)
+#define TEST_STD_ERROR_ID UINT32_C(0xfffffff4)
+
+typedef struct {
+    uint32_t cb;
+    uint16_t *reserved;
+    uint16_t *desktop;
+    uint16_t *title;
+    uint32_t x;
+    uint32_t y;
+    uint32_t x_size;
+    uint32_t y_size;
+    uint32_t x_count_chars;
+    uint32_t y_count_chars;
+    uint32_t fill_attribute;
+    uint32_t flags;
+    uint16_t show_window;
+    uint16_t reserved2_size;
+    uint8_t *reserved2;
+    void *standard_input;
+    void *standard_output;
+    void *standard_error;
+} test_startup_info_w;
+
+_Static_assert(sizeof(test_startup_info_w) == 104U,
+               "Windows x64 STARTUPINFOW test layout changed");
+
 static sl_status resolve_name(const sl_module_registry *registry,
                               const char *name, sl_resolved_symbol *resolved) {
     sl_pe_import_symbol import = {
@@ -340,6 +368,207 @@ static bool test_context_scopes(void) {
     CHECK(sl_win32_context_enter(&second, &first_scope) == SL_OK);
     CHECK(sl_win32_context_leave(&first_scope) == SL_OK);
     CHECK(sl_win32_process_destroy(process) == SL_OK);
+    return true;
+}
+
+static bool startup_info_matches(const test_startup_info_w *info,
+                                 void *standard_input,
+                                 void *standard_output,
+                                 void *standard_error) {
+    return info->cb == sizeof(*info) && info->reserved == NULL &&
+           info->desktop == NULL && info->title == NULL && info->x == 0U &&
+           info->y == 0U && info->x_size == 0U && info->y_size == 0U &&
+           info->x_count_chars == 0U && info->y_count_chars == 0U &&
+           info->fill_attribute == 0U && info->flags == 0U &&
+           info->show_window == 0U && info->reserved2_size == 0U &&
+           info->reserved2 == NULL &&
+           info->standard_input == standard_input &&
+           info->standard_output == standard_output &&
+           info->standard_error == standard_error;
+}
+
+static bool test_process_standard_handles(void) {
+    typedef void *(SL_WINAPI *get_std_handle_function)(uint32_t);
+    typedef sl_win32_bool(SL_WINAPI *set_std_handle_function)(uint32_t,
+                                                               void *);
+    typedef void(SL_WINAPI *get_startup_info_w_function)(void *);
+    typedef uint32_t(SL_WINAPI *get_file_type_function)(void *);
+    typedef sl_win32_bool(SL_WINAPI *get_console_mode_function)(
+        void *, uint32_t *);
+    typedef sl_win32_bool(SL_WINAPI *write_file_function)(
+        void *, const void *, uint32_t, uint32_t *, void *);
+
+    sl_module_registry registry;
+    sl_module_registry_init(&registry);
+    CHECK(sl_kernel32_register(&registry) == SL_OK);
+
+    sl_resolved_symbol resolved;
+    uintptr_t address = 0U;
+    get_std_handle_function get_std_handle = NULL;
+    set_std_handle_function set_std_handle = NULL;
+    get_startup_info_w_function get_startup_info_w = NULL;
+    get_file_type_function get_file_type = NULL;
+    get_console_mode_function get_console_mode = NULL;
+    write_file_function write_file = NULL;
+
+    CHECK(resolve_name(&registry, "GetStdHandle", &resolved) == SL_OK);
+    address = (uintptr_t)resolved.guest_address;
+    _Static_assert(sizeof(get_std_handle) <= sizeof(address),
+                   "native function pointer does not fit uintptr_t");
+    memcpy(&get_std_handle, &address, sizeof(get_std_handle));
+    CHECK(resolve_name(&registry, "SetStdHandle", &resolved) == SL_OK);
+    address = (uintptr_t)resolved.guest_address;
+    _Static_assert(sizeof(set_std_handle) <= sizeof(address),
+                   "native function pointer does not fit uintptr_t");
+    memcpy(&set_std_handle, &address, sizeof(set_std_handle));
+    CHECK(resolve_name(&registry, "GetStartupInfoW", &resolved) == SL_OK);
+    address = (uintptr_t)resolved.guest_address;
+    _Static_assert(sizeof(get_startup_info_w) <= sizeof(address),
+                   "native function pointer does not fit uintptr_t");
+    memcpy(&get_startup_info_w, &address, sizeof(get_startup_info_w));
+    CHECK(resolve_name(&registry, "GetFileType", &resolved) == SL_OK);
+    address = (uintptr_t)resolved.guest_address;
+    _Static_assert(sizeof(get_file_type) <= sizeof(address),
+                   "native function pointer does not fit uintptr_t");
+    memcpy(&get_file_type, &address, sizeof(get_file_type));
+    CHECK(resolve_name(&registry, "GetConsoleMode", &resolved) == SL_OK);
+    address = (uintptr_t)resolved.guest_address;
+    _Static_assert(sizeof(get_console_mode) <= sizeof(address),
+                   "native function pointer does not fit uintptr_t");
+    memcpy(&get_console_mode, &address, sizeof(get_console_mode));
+    CHECK(resolve_name(&registry, "WriteFile", &resolved) == SL_OK);
+    address = (uintptr_t)resolved.guest_address;
+    _Static_assert(sizeof(write_file) <= sizeof(address),
+                   "native function pointer does not fit uintptr_t");
+    memcpy(&write_file, &address, sizeof(write_file));
+
+    void *const invalid_handle = (void *)UINTPTR_MAX;
+    sl_kernel32_set_last_error(0U);
+    CHECK(get_std_handle(TEST_STD_OUTPUT_ID) == invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    sl_kernel32_set_last_error(0U);
+    CHECK(set_std_handle(TEST_STD_OUTPUT_ID, NULL) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+
+    sl_win32_process *first_process = NULL;
+    sl_win32_process *second_process = NULL;
+    CHECK(sl_win32_process_create(&first_process) == SL_OK);
+    CHECK(sl_win32_process_create(&second_process) == SL_OK);
+    uintptr_t direct_handle = UINTPTR_MAX;
+    CHECK(sl_win32_process_get_standard_handle(
+              NULL, SL_WIN32_STANDARD_INPUT, &direct_handle) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(direct_handle == 0U);
+    direct_handle = UINTPTR_MAX;
+    CHECK(sl_win32_process_get_standard_handle(
+              first_process, (sl_win32_standard_handle)3,
+              &direct_handle) == SL_ERROR_INVALID_ARGUMENT);
+    CHECK(direct_handle == 0U);
+    CHECK(sl_win32_process_get_standard_handle(
+              first_process, SL_WIN32_STANDARD_INPUT, NULL) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_win32_process_set_standard_handle(
+              NULL, SL_WIN32_STANDARD_INPUT, 9U) == SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_win32_process_set_standard_handle(
+              first_process, (sl_win32_standard_handle)3, 9U) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    sl_win32_thread_context first_thread = {.process = first_process};
+    sl_win32_thread_context second_thread = {.process = second_process};
+    sl_win32_context_scope first_scope;
+    sl_win32_context_scope second_scope;
+
+    void *const default_input = (void *)(uintptr_t)1U;
+    void *const default_output = (void *)(uintptr_t)2U;
+    void *const default_error = (void *)(uintptr_t)3U;
+    void *const first_output = (void *)(uintptr_t)0x11110000U;
+    void *const second_output = (void *)(uintptr_t)0x22220000U;
+
+    CHECK(sl_win32_context_enter(&first_thread, &first_scope) == SL_OK);
+    CHECK(get_std_handle(TEST_STD_INPUT_ID) == default_input);
+    CHECK(get_std_handle(TEST_STD_OUTPUT_ID) == default_output);
+    CHECK(get_std_handle(TEST_STD_ERROR_ID) == default_error);
+
+    sl_kernel32_set_last_error(0U);
+    CHECK(get_std_handle(UINT32_MAX) == invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    sl_kernel32_set_last_error(0U);
+    CHECK(set_std_handle(0U, first_output) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(get_std_handle(TEST_STD_OUTPUT_ID) == default_output);
+
+    CHECK(set_std_handle(TEST_STD_INPUT_ID, NULL) == SL_WIN32_TRUE);
+    CHECK(set_std_handle(TEST_STD_OUTPUT_ID, first_output) == SL_WIN32_TRUE);
+    CHECK(set_std_handle(TEST_STD_ERROR_ID, invalid_handle) == SL_WIN32_TRUE);
+    sl_kernel32_set_last_error(UINT32_C(0x12345678));
+    CHECK(get_std_handle(TEST_STD_INPUT_ID) == NULL);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x12345678));
+    CHECK(get_std_handle(TEST_STD_OUTPUT_ID) == first_output);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x12345678));
+    CHECK(get_std_handle(TEST_STD_ERROR_ID) == invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x12345678));
+
+    test_startup_info_w first_info;
+    memset(&first_info, 0xa5, sizeof(first_info));
+    get_startup_info_w(&first_info);
+    CHECK(startup_info_matches(&first_info, NULL, first_output,
+                               invalid_handle));
+    sl_kernel32_set_last_error(0U);
+    get_startup_info_w(NULL);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+
+    sl_kernel32_set_last_error(0U);
+    CHECK(get_file_type(first_output) == 0U);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    CHECK(get_file_type(default_input) == 2U);
+    CHECK(get_file_type(default_output) == 2U);
+    CHECK(get_file_type(default_error) == 2U);
+    uint32_t console_mode = UINT32_MAX;
+    CHECK(get_console_mode(default_input, &console_mode) == SL_WIN32_TRUE);
+    CHECK(console_mode == 0U);
+    console_mode = UINT32_MAX;
+    sl_kernel32_set_last_error(0U);
+    CHECK(get_console_mode(first_output, &console_mode) == SL_WIN32_FALSE);
+    CHECK(console_mode == UINT32_MAX);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    uint32_t bytes_written = 99U;
+    sl_kernel32_set_last_error(0U);
+    CHECK(write_file(first_output, "", 0U, &bytes_written, NULL) ==
+          SL_WIN32_FALSE);
+    CHECK(bytes_written == 0U);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    bytes_written = 99U;
+    sl_kernel32_set_last_error(0U);
+    CHECK(write_file(invalid_handle, "", 0U, &bytes_written, NULL) ==
+          SL_WIN32_FALSE);
+    CHECK(bytes_written == 0U);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+
+    CHECK(sl_win32_context_enter(&second_thread, &second_scope) == SL_OK);
+    CHECK(get_std_handle(TEST_STD_INPUT_ID) == default_input);
+    CHECK(get_std_handle(TEST_STD_OUTPUT_ID) == default_output);
+    CHECK(get_std_handle(TEST_STD_ERROR_ID) == default_error);
+    test_startup_info_w second_info;
+    memset(&second_info, 0xa5, sizeof(second_info));
+    get_startup_info_w(&second_info);
+    CHECK(startup_info_matches(&second_info, default_input, default_output,
+                               default_error));
+    CHECK(set_std_handle(TEST_STD_OUTPUT_ID, second_output) == SL_WIN32_TRUE);
+    CHECK(get_std_handle(TEST_STD_OUTPUT_ID) == second_output);
+    CHECK(sl_win32_context_leave(&second_scope) == SL_OK);
+
+    CHECK(get_std_handle(TEST_STD_INPUT_ID) == NULL);
+    CHECK(get_std_handle(TEST_STD_OUTPUT_ID) == first_output);
+    CHECK(get_std_handle(TEST_STD_ERROR_ID) == invalid_handle);
+    CHECK(sl_win32_context_leave(&first_scope) == SL_OK);
+
+    CHECK(sl_win32_context_enter(&second_thread, &second_scope) == SL_OK);
+    CHECK(get_std_handle(TEST_STD_INPUT_ID) == default_input);
+    CHECK(get_std_handle(TEST_STD_OUTPUT_ID) == second_output);
+    CHECK(get_std_handle(TEST_STD_ERROR_ID) == default_error);
+    CHECK(sl_win32_context_leave(&second_scope) == SL_OK);
+
+    CHECK(sl_win32_process_destroy(second_process) == SL_OK);
+    CHECK(sl_win32_process_destroy(first_process) == SL_OK);
     return true;
 }
 
@@ -837,6 +1066,7 @@ int main(void) {
         {"last-error and TLS", test_last_error_and_tls},
         {"TLS concurrent index reuse", test_tls_concurrent_reuse},
         {"nested thread contexts", test_context_scopes},
+        {"process-local standard handles", test_process_standard_handles},
         {"context host-thread affinity", test_context_host_thread_affinity},
         {"context-local TLS and FLS", test_context_local_tls_and_fls},
         {"process pointer cookie", test_process_pointer_cookie},
