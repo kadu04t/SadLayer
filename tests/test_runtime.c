@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+#include "sadlayer/handle_table.h"
 #include "sadlayer/kernel32.h"
 #include "sadlayer/loader.h"
 #include "sadlayer/module.h"
@@ -40,6 +41,11 @@
             return false;                                                       \
         }                                                                      \
     } while (false)
+
+static void mark_destroyed(void *opaque) {
+    bool *destroyed = opaque;
+    *destroyed = true;
+}
 
 static void put_u16(uint8_t *data, size_t offset, uint16_t value) {
     data[offset] = (uint8_t)(value & 0xffU);
@@ -638,6 +644,27 @@ static bool test_worker_validates_arguments_image_and_state(void) {
     sl_status leave_status = sl_win32_context_leave(&scope);
     CHECK(leave_status == SL_OK);
     CHECK(rejected_active_context);
+
+    bool handle_destroyed = false;
+    sl_handle handle = 0U;
+    sl_handle_table *handles = sl_win32_process_handle_table(process);
+    CHECK(sl_handle_table_insert(handles, SL_HANDLE_KIND_FILE,
+                                 &handle_destroyed, mark_destroyed,
+                                 &handle) == SL_OK);
+    sl_handle_lease lease = {0};
+    CHECK(sl_handle_table_acquire(handles, handle, SL_HANDLE_KIND_FILE,
+                                  &lease) == SL_OK);
+    CHECK(rejected_worker_report_is_clean(&image, &mapped, process,
+                                          SL_ERROR_INVALID_STATE));
+    sl_handle_lease_release(&lease);
+
+    sl_runtime_report report;
+    CHECK(sl_runtime_run_trusted_worker(&image, &mapped, process, &report) ==
+          SL_OK);
+    CHECK(report.outcome == SL_RUNTIME_OUTCOME_RETURNED);
+    CHECK(sl_handle_table_close(handles, handle, SL_HANDLE_KIND_FILE) ==
+          SL_OK);
+    CHECK(handle_destroyed);
 
     CHECK(sl_win32_process_destroy(process) == SL_OK);
     sl_loader_unmap_image(&mapped);

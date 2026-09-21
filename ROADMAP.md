@@ -110,8 +110,11 @@ Implement the minimum coherent process model rather than isolated stubs:
 - [x] Explicit `RaiseException` first-pass dispatch, process-local unhandled
   filter, two-pass `RtlUnwindEx`, and context restoration, exercised through
   PE-resident handlers and bound KERNEL32 imports.
+- [x] Process-local typed handle core with tagged generation/slot identifiers,
+  kind validation, lease-delayed destruction, stale-handle rejection, and
+  cleanup owned by process destruction.
 - [ ] PE TLS directory/callbacks, validated guest pointers, and coherent
-  handles/object lifetimes.
+  module thread data.
 - [ ] Fiber contexts and process-wide FLS callback enumeration.
 - [ ] Current directory, Windows path normalization, virtual memory, files,
   directories, mappings, waits, synchronization objects, and threads.

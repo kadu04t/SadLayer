@@ -1,5 +1,6 @@
 #include "sadlayer/process.h"
 
+#include "sadlayer/handle_table.h"
 #include "sadlayer/module_space.h"
 #include "sadlayer/unicode.h"
 
@@ -22,6 +23,7 @@ struct sl_win32_process {
     atomic_uint active_references;
     atomic_uintptr_t unhandled_exception_filter;
     uintptr_t pointer_cookie;
+    sl_handle_table *handle_table;
     sl_module_space *module_space;
     const sl_loaded_module *main_module;
     uint16_t *main_image_path;
@@ -77,12 +79,19 @@ sl_status sl_win32_process_create(sl_win32_process **out_process) {
     atomic_init(&process->active_references, 0U);
     atomic_init(&process->unhandled_exception_filter, 0U);
 
-    sl_status status;
+    sl_status status =
+        sl_handle_table_create(&process->handle_table);
+    if (status != SL_OK) {
+        free(process);
+        return status;
+    }
+
     do {
         status = random_bytes(&process->pointer_cookie,
                               sizeof(process->pointer_cookie));
     } while (status == SL_OK && process->pointer_cookie == 0U);
     if (status != SL_OK) {
+        sl_handle_table_destroy(process->handle_table);
         free(process);
         return status;
     }
@@ -107,6 +116,7 @@ sl_status sl_win32_process_destroy(sl_win32_process *process) {
                              memory_order_acquire) != 0U) {
         return SL_ERROR_INVALID_STATE;
     }
+    sl_handle_table_destroy(process->handle_table);
     sl_module_space_destroy(process->module_space);
     free(process->main_image_path);
     memset(process, 0, sizeof(*process));
@@ -270,6 +280,10 @@ const sl_module_space *sl_win32_process_module_space(
 const sl_loaded_module *sl_win32_process_main_module(
     const sl_win32_process *process) {
     return process == NULL ? NULL : process->main_module;
+}
+
+sl_handle_table *sl_win32_process_handle_table(sl_win32_process *process) {
+    return process == NULL ? NULL : process->handle_table;
 }
 
 sl_status sl_win32_process_main_image_path(

@@ -9,6 +9,7 @@
 typedef struct sl_win32_process sl_win32_process;
 struct sl_loaded_module;
 struct sl_module_space;
+struct sl_handle_table;
 
 #define SL_WIN32_PEB_IMAGE_BASE_OFFSET 0x10U
 #define SL_WIN32_PEB_PROCESS_PARAMETERS_OFFSET 0x20U
@@ -52,6 +53,9 @@ const struct sl_module_space *sl_win32_process_module_space(
     const sl_win32_process *process);
 const struct sl_loaded_module *sl_win32_process_main_module(
     const sl_win32_process *process);
+/* Borrowed mutable table, valid while the process remains alive/retained. */
+struct sl_handle_table *sl_win32_process_handle_table(
+    sl_win32_process *process);
 sl_status sl_win32_process_main_image_path(
     const sl_win32_process *process, const uint16_t **path,
     size_t *path_length);

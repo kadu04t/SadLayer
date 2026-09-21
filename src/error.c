@@ -60,6 +60,12 @@ const char *sl_status_string(sl_status status) {
         return "guest thread environment setup failed";
     case SL_ERROR_WORKER_PROTOCOL:
         return "guest worker returned an invalid report";
+    case SL_ERROR_HANDLE_NOT_FOUND:
+        return "process handle was not found";
+    case SL_ERROR_HANDLE_TYPE_MISMATCH:
+        return "process handle has the wrong object type";
+    case SL_ERROR_HANDLE_TABLE_FULL:
+        return "process handle table is full";
     case SL_ERROR_NOT_IMPLEMENTED:
         return "not implemented yet";
     default:

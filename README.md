@@ -43,6 +43,10 @@ The bootstrap can already:
   exception/unwind dispatch, and process termination;
 - create explicit guest process objects with an OS-random pointer cookie used by
   the reversible `EncodePointer`/`DecodePointer` pair;
+- maintain a process-owned typed handle table whose tagged generation/slot
+  tokens reject stale and wrong-kind access, while reference-counted leases keep
+  an object alive when close races an operation; this is internal plumbing for
+  future file/search objects, not a guest filesystem API yet;
 - convert explicit-length UTF-8/UTF-16 strictly or with replacement, without
   exposing Linux `wchar_t` at the Windows boundary;
 - install nestable per-thread runtime contexts and route last-error, thread

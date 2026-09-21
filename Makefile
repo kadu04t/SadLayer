@@ -6,7 +6,8 @@ LDFLAGS ?=
 THREAD_FLAGS ?= -pthread
 
 LIB_SOURCES := src/error.c src/pe.c src/loader.c src/module.c \
-	src/module_space.c src/unicode.c src/process.c src/context.c src/teb.c \
+	src/module_space.c src/unicode.c src/handle_table.c src/process.c \
+	src/context.c src/teb.c \
 	src/win32.c src/kernel32.c src/win64_unwind.c src/runtime.c
 LIB_ASSEMBLY_SOURCES := src/win64_context.S
 CLI_SOURCES := src/main.c
@@ -15,6 +16,7 @@ TEST_KERNEL32_SOURCES := tests/test_kernel32.c
 TEST_UNICODE_SOURCES := tests/test_unicode.c
 TEST_RUNTIME_SOURCES := tests/test_runtime.c
 TEST_TEB_SOURCES := tests/test_teb.c
+TEST_HANDLE_TABLE_SOURCES := tests/test_handle_table.c
 TEST_WIN64_SOURCES := tests/test_win64_unwind.c
 TEST_WIN64_ASSEMBLY_SOURCES := tests/test_win64_probe.S
 LIB_OBJECTS := $(LIB_SOURCES:%.c=$(BUILD_DIR)/%.o) \
@@ -29,11 +31,13 @@ TEST_KERNEL32_OBJECTS := $(TEST_KERNEL32_SOURCES:%.c=$(BUILD_DIR)/%.o)
 TEST_UNICODE_OBJECTS := $(TEST_UNICODE_SOURCES:%.c=$(BUILD_DIR)/%.o)
 TEST_RUNTIME_OBJECTS := $(TEST_RUNTIME_SOURCES:%.c=$(BUILD_DIR)/%.o)
 TEST_TEB_OBJECTS := $(TEST_TEB_SOURCES:%.c=$(BUILD_DIR)/%.o)
+TEST_HANDLE_TABLE_OBJECTS := \
+	$(TEST_HANDLE_TABLE_SOURCES:%.c=$(BUILD_DIR)/%.o)
 TEST_WIN64_OBJECTS := $(TEST_WIN64_SOURCES:%.c=$(BUILD_DIR)/%.o) \
 	$(TEST_WIN64_ASSEMBLY_SOURCES:%.S=$(BUILD_DIR)/%.o)
 TEST_OBJECTS := $(TEST_PE_OBJECTS) $(TEST_KERNEL32_OBJECTS) \
 	$(TEST_UNICODE_OBJECTS) $(TEST_RUNTIME_OBJECTS) $(TEST_TEB_OBJECTS) \
-	$(TEST_WIN64_OBJECTS)
+	$(TEST_HANDLE_TABLE_OBJECTS) $(TEST_WIN64_OBJECTS)
 DEPFILES := $(LIB_OBJECTS:.o=.d) $(TEST_KERNEL32_LIB_OBJECT:.o=.d) \
 	$(CLI_OBJECTS:.o=.d) $(TEST_OBJECTS:.o=.d)
 
@@ -59,6 +63,10 @@ $(BUILD_DIR)/test_runtime: $(TEST_LIB_OBJECTS) $(TEST_RUNTIME_OBJECTS)
 $(BUILD_DIR)/test_teb: $(TEST_LIB_OBJECTS) $(TEST_TEB_OBJECTS)
 	$(CC) $(LDFLAGS) $(THREAD_FLAGS) $^ -o $@
 
+$(BUILD_DIR)/test_handle_table: $(TEST_LIB_OBJECTS) \
+	$(TEST_HANDLE_TABLE_OBJECTS)
+	$(CC) $(LDFLAGS) $(THREAD_FLAGS) $^ -o $@
+
 $(BUILD_DIR)/test_win64_unwind: $(TEST_LIB_OBJECTS) $(TEST_WIN64_OBJECTS)
 	$(CC) $(LDFLAGS) $(THREAD_FLAGS) $^ -o $@
 
@@ -79,12 +87,13 @@ $(BUILD_DIR)/%.o: %.S
 
 test: $(BUILD_DIR)/test_pe $(BUILD_DIR)/test_kernel32 $(BUILD_DIR)/test_unicode \
 	$(BUILD_DIR)/test_runtime $(BUILD_DIR)/test_teb \
-	$(BUILD_DIR)/test_win64_unwind
+	$(BUILD_DIR)/test_handle_table $(BUILD_DIR)/test_win64_unwind
 	./$(BUILD_DIR)/test_pe
 	./$(BUILD_DIR)/test_kernel32
 	./$(BUILD_DIR)/test_unicode
 	./$(BUILD_DIR)/test_runtime
 	./$(BUILD_DIR)/test_teb
+	./$(BUILD_DIR)/test_handle_table
 	./$(BUILD_DIR)/test_win64_unwind
 
 check: all test

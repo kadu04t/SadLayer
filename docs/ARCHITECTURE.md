@@ -51,18 +51,29 @@ guest x86-64 entry point            NT/process object model
   only an immutable view and process destruction owns its cleanup.
 - `unicode`: validates and converts explicit-length UTF-8/UTF-16 buffers without
   using the incompatible Linux `wchar_t` representation.
+- `handle_table`: owns 256 typed object slots per guest process. Handles are
+  opaque tagged generation/slot tokens, never Linux descriptors or host
+  pointers. `FILE` and `SEARCH` kinds cannot be confused; acquiring a handle
+  creates a reference-counted lease, close invalidates its token immediately,
+  and object destruction is deferred until existing leases end without running
+  callbacks under the table lock. A clone-safe atomic snapshot protocol keeps
+  the table coherent across the isolated worker's `clone`, rejecting active
+  leases or destructors, while process teardown drains still-open objects after
+  guest operations are quiescent. Guest filesystem APIs are not connected to
+  this internal core yet.
 - `process`: owns stable per-guest process state: an OS-random pointer cookie,
-  minimal PEB, and normalized process-parameters storage. Before any thread or
-  worker retains it, a one-shot operation can transfer in one finalized module
-  space, designate its exact main PE, and copy a validated UTF-16 image path
-  supplied with an explicit length into process-owned terminated storage. The
-  same operation writes the main mapping base to `PEB.ImageBaseAddress`; later
-  manual image-base changes cannot contradict the adopted main module.
+  typed handle table, minimal PEB, and normalized process-parameters storage.
+  Before any thread or worker retains it, a one-shot operation can transfer in
+  one finalized module space, designate its exact main PE, and copy a validated
+  UTF-16 image path supplied with an explicit length into process-owned
+  terminated storage. The same operation writes the main mapping base to
+  `PEB.ImageBaseAddress`; later manual image-base changes cannot contradict the
+  adopted main module.
   It also owns the atomically replaceable top-level exception filter used by
   explicit guest exception dispatch.
   Module-space, main-module, and path getters are borrowed read-only views valid
-  for the retained process lifetime. General handles and recursive loader state
-  remain future work.
+  for the retained process lifetime. Guest-facing handle APIs and recursive
+  loader state remain future work.
 - `context`: installs a nestable thread-local view of the active Windows thread
   and process object; last-error, thread identity, TLS/FLS values, and pointer
   encoding already use it. An atomic ownership token prevents one guest context

@@ -2,6 +2,7 @@
 
 #include "sadlayer/runtime.h"
 
+#include "sadlayer/handle_table.h"
 #include "sadlayer/module.h"
 #include "sadlayer/teb.h"
 #include "sadlayer/win32.h"
@@ -498,6 +499,8 @@ static _Noreturn void write_worker_report_and_exit(
 
 static int run_worker_child(void *opaque) {
     sl_runtime_worker_state *state = opaque;
+    sl_handle_table_complete_clone(
+        sl_win32_process_handle_table(state->process));
     (void)close(state->read_fd);
 
     sl_runtime_wire_report wire = {
@@ -786,7 +789,21 @@ sl_status sl_runtime_run_trusted_worker(const sl_pe_image *image,
         sl_win32_process_release(process);
         return status;
     }
+    sl_handle_table *handle_table =
+        sl_win32_process_handle_table(process);
+    status = sl_handle_table_prepare_clone(handle_table);
+    if (status != SL_OK) {
+        sl_status restore_status =
+            set_kernel_signal_mask(parent_signal_mask, NULL);
+        (void)close(pipe_fds[0]);
+        (void)close(pipe_fds[1]);
+        destroy_guarded_stack(&signal_stack);
+        destroy_guarded_stack(&stack);
+        sl_win32_process_release(process);
+        return restore_status == SL_OK ? status : restore_status;
+    }
     int child = clone(run_worker_child, stack.base, SIGCHLD, &state);
+    sl_handle_table_complete_clone(handle_table);
     sl_status parent_mask_status =
         set_kernel_signal_mask(parent_signal_mask, NULL);
     if (child < 0) {
