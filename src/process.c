@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include "sadlayer/process.h"
 
 #include "sadlayer/handle_table.h"
@@ -5,6 +7,7 @@
 #include "sadlayer/unicode.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdalign.h>
 #include <stdatomic.h>
@@ -14,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/random.h>
+#include <unistd.h>
 
 #define SL_PEB_SIZE 0x1000U
 #define SL_PROCESS_PARAMETERS_SIZE 0x1000U
@@ -29,6 +33,7 @@ struct sl_win32_process {
     atomic_uintptr_t standard_handles[SL_STANDARD_HANDLE_COUNT];
     uintptr_t pointer_cookie;
     sl_handle_table *handle_table;
+    int filesystem_directory_fd;
     sl_module_space *module_space;
     const sl_loaded_module *main_module;
     uint16_t *main_image_path;
@@ -83,6 +88,7 @@ sl_status sl_win32_process_create(sl_win32_process **out_process) {
     if (process == NULL) {
         return SL_ERROR_OUT_OF_MEMORY;
     }
+    process->filesystem_directory_fd = -1;
     atomic_init(&process->active_references, 0U);
     atomic_init(&process->unhandled_exception_filter, 0U);
     atomic_init(&process->standard_handles[SL_WIN32_STANDARD_INPUT],
@@ -130,6 +136,9 @@ sl_status sl_win32_process_destroy(sl_win32_process *process) {
         return SL_ERROR_INVALID_STATE;
     }
     sl_handle_table_destroy(process->handle_table);
+    if (process->filesystem_directory_fd >= 0) {
+        (void)close(process->filesystem_directory_fd);
+    }
     sl_module_space_destroy(process->module_space);
     free(process->main_image_path);
     memset(process, 0, sizeof(*process));
@@ -176,6 +185,31 @@ sl_status sl_win32_process_set_image_base(sl_win32_process *process,
     }
     store_uintptr(process->peb + SL_WIN32_PEB_IMAGE_BASE_OFFSET,
                   (uintptr_t)image_base);
+    return SL_OK;
+}
+
+sl_status sl_win32_process_set_filesystem_directory(
+    sl_win32_process *process, const char *host_directory) {
+    if (process == NULL || host_directory == NULL || host_directory[0] == '\0') {
+        return SL_ERROR_INVALID_ARGUMENT;
+    }
+    if (process->filesystem_directory_fd >= 0 ||
+        atomic_load_explicit(&process->active_references,
+                             memory_order_acquire) != 0U) {
+        return SL_ERROR_INVALID_STATE;
+    }
+
+    int fd = open(host_directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) {
+        return SL_ERROR_IO;
+    }
+    if (process->filesystem_directory_fd >= 0 ||
+        atomic_load_explicit(&process->active_references,
+                             memory_order_acquire) != 0U) {
+        (void)close(fd);
+        return SL_ERROR_INVALID_STATE;
+    }
+    process->filesystem_directory_fd = fd;
     return SL_OK;
 }
 
@@ -297,6 +331,11 @@ const sl_loaded_module *sl_win32_process_main_module(
 
 sl_handle_table *sl_win32_process_handle_table(sl_win32_process *process) {
     return process == NULL ? NULL : process->handle_table;
+}
+
+int sl_win32_process_filesystem_directory(
+    const sl_win32_process *process) {
+    return process == NULL ? -1 : process->filesystem_directory_fd;
 }
 
 static bool standard_handle_is_valid(sl_win32_standard_handle which) {

@@ -67,9 +67,12 @@ guest x86-64 entry point            NT/process object model
   `FindClose`, and general disk paths are not connected yet.
 - `process`: owns stable per-guest process state: an OS-random pointer cookie,
   typed handle table, three atomic standard-handle slots, minimal PEB, and
-  normalized process-parameters storage. Standard-handle values are isolated
-  between processes but remain raw, non-owning values until file objects are
-  connected. Before any thread or worker retains it, a one-shot operation can
+  normalized process-parameters storage. Before publication it can also pin
+  one host directory through a private close-on-exec descriptor for future
+  relative filesystem lookups, without changing the host's global working
+  directory. Standard-handle values are isolated between processes but remain
+  raw, non-owning values until file objects are connected. Before any thread or
+  worker retains it, a one-shot operation can
   transfer in one finalized module space, designate its exact main PE, and copy
   a validated UTF-16 image path supplied with an explicit length into
   process-owned terminated storage. The same operation writes the main mapping

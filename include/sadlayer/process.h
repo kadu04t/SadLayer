@@ -43,6 +43,14 @@ sl_status sl_win32_process_set_image_base(sl_win32_process *process,
                                           uint64_t image_base);
 
 /*
+ * Pins one host directory as the base for relative guest filesystem lookups.
+ * Configuration is one-shot and must happen before publishing a guest thread.
+ * The process owns its private directory descriptor until destruction.
+ */
+sl_status sl_win32_process_set_filesystem_directory(
+    sl_win32_process *process, const char *host_directory);
+
+/*
  * Transfers ownership of a fully bound/finalized bootstrap module space into
  * an otherwise unconfigured process. The transfer is one-shot and must happen
  * before any process reference is published. On success, *space_io is NULL;
@@ -62,6 +70,9 @@ const struct sl_loaded_module *sl_win32_process_main_module(
 /* Borrowed mutable table, valid while the process remains alive/retained. */
 struct sl_handle_table *sl_win32_process_handle_table(
     sl_win32_process *process);
+/* Borrowed host descriptor for internal backends; -1 means unconfigured. */
+int sl_win32_process_filesystem_directory(
+    const sl_win32_process *process);
 /* Standard-handle values are process-local and are not validated or owned. */
 sl_status sl_win32_process_get_standard_handle(
     const sl_win32_process *process, sl_win32_standard_handle which,

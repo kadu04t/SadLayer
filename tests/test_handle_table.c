@@ -1,12 +1,17 @@
+#define _GNU_SOURCE
+
 #include "sadlayer/handle_table.h"
 #include "sadlayer/process.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <threads.h>
@@ -107,6 +112,50 @@ static bool test_arguments_and_clean_outputs(void) {
     sl_handle_table_destroy(table);
     sl_handle_table_destroy(NULL);
     CHECK(atomic_load_explicit(&destroyed, memory_order_relaxed) == 0U);
+    return true;
+}
+
+static bool test_process_filesystem_directory(void) {
+    char directory[] = "/tmp/sadlayer-process-root-XXXXXX";
+    CHECK(mkdtemp(directory) != NULL);
+
+    sl_win32_process *process = NULL;
+    CHECK(sl_win32_process_create(&process) == SL_OK);
+    CHECK(sl_win32_process_filesystem_directory(NULL) == -1);
+    CHECK(sl_win32_process_filesystem_directory(process) == -1);
+    CHECK(sl_win32_process_set_filesystem_directory(NULL, directory) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_win32_process_set_filesystem_directory(process, NULL) ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_win32_process_set_filesystem_directory(process, "") ==
+          SL_ERROR_INVALID_ARGUMENT);
+    CHECK(sl_win32_process_set_filesystem_directory(
+              process, "/tmp/sadlayer-directory-that-does-not-exist") ==
+          SL_ERROR_IO);
+
+    CHECK(sl_win32_process_set_filesystem_directory(process, directory) ==
+          SL_OK);
+    int directory_fd = sl_win32_process_filesystem_directory(process);
+    CHECK(directory_fd >= 0);
+    struct stat metadata;
+    CHECK(fstat(directory_fd, &metadata) == 0);
+    CHECK(S_ISDIR(metadata.st_mode));
+    CHECK(sl_win32_process_set_filesystem_directory(process, directory) ==
+          SL_ERROR_INVALID_STATE);
+
+    sl_win32_process *published = NULL;
+    CHECK(sl_win32_process_create(&published) == SL_OK);
+    CHECK(sl_win32_process_retain(published) == SL_OK);
+    CHECK(sl_win32_process_set_filesystem_directory(published, directory) ==
+          SL_ERROR_INVALID_STATE);
+    sl_win32_process_release(published);
+    CHECK(sl_win32_process_destroy(published) == SL_OK);
+
+    CHECK(sl_win32_process_destroy(process) == SL_OK);
+    errno = 0;
+    CHECK(fcntl(directory_fd, F_GETFD) == -1);
+    CHECK(errno == EBADF);
+    CHECK(rmdir(directory) == 0);
     return true;
 }
 
@@ -560,6 +609,7 @@ int main(void) {
         bool (*run)(void);
     } tests[] = {
         {"arguments and clean outputs", test_arguments_and_clean_outputs},
+        {"process filesystem directory", test_process_filesystem_directory},
         {"lifecycle, kind, and malformed handles",
          test_lifecycle_kind_and_malformed_handles},
         {"close defers destruction until release",
