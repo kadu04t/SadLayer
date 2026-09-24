@@ -1,4 +1,5 @@
 #include "sadlayer/context.h"
+#include "sadlayer/handle_table.h"
 #include "sadlayer/kernel32.h"
 #include "sadlayer/module.h"
 #include "sadlayer/pe.h"
@@ -572,6 +573,154 @@ static bool test_process_standard_handles(void) {
     return true;
 }
 
+static void count_closed_handle(void *opaque) {
+    atomic_uint *closed = opaque;
+    (void)atomic_fetch_add_explicit(closed, 1U, memory_order_relaxed);
+}
+
+static bool test_close_handle_uses_process_table(void) {
+    typedef sl_win32_bool(SL_WINAPI *close_handle_function)(void *);
+
+    sl_module_registry registry;
+    sl_module_registry_init(&registry);
+    CHECK(sl_kernel32_register(&registry) == SL_OK);
+    sl_resolved_symbol resolved;
+    CHECK(resolve_name(&registry, "CloseHandle", &resolved) == SL_OK);
+    uintptr_t address = (uintptr_t)resolved.guest_address;
+    close_handle_function close_handle = NULL;
+    _Static_assert(sizeof(close_handle) <= sizeof(address),
+                   "native function pointer does not fit uintptr_t");
+    memcpy(&close_handle, &address, sizeof(close_handle));
+
+    sl_win32_process *first_process = NULL;
+    sl_win32_process *second_process = NULL;
+    CHECK(sl_win32_process_create(&first_process) == SL_OK);
+    CHECK(sl_win32_process_create(&second_process) == SL_OK);
+    sl_handle_table *first_table =
+        sl_win32_process_handle_table(first_process);
+    sl_handle_table *second_table =
+        sl_win32_process_handle_table(second_process);
+    CHECK(first_table != NULL && second_table != NULL);
+
+    atomic_uint first_file_closed;
+    atomic_uint second_file_closed;
+    atomic_uint search_closed;
+    atomic_init(&first_file_closed, 0U);
+    atomic_init(&second_file_closed, 0U);
+    atomic_init(&search_closed, 0U);
+    sl_handle first_file = 0U;
+    sl_handle second_file = 0U;
+    sl_handle search = 0U;
+    CHECK(sl_handle_table_insert(first_table, SL_HANDLE_KIND_FILE,
+                                 &first_file_closed, count_closed_handle,
+                                 &first_file) == SL_OK);
+    CHECK(sl_handle_table_insert(second_table, SL_HANDLE_KIND_FILE,
+                                 &second_file_closed, count_closed_handle,
+                                 &second_file) == SL_OK);
+    CHECK(first_file == second_file);
+    CHECK(sl_handle_table_insert(first_table, SL_HANDLE_KIND_SEARCH,
+                                 &search_closed, count_closed_handle,
+                                 &search) == SL_OK);
+
+    void *const first_file_value = (void *)(uintptr_t)first_file;
+    void *const arbitrary = (void *)(uintptr_t)0x12345678U;
+    sl_kernel32_set_last_error(0U);
+    CHECK(close_handle(first_file_value) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    CHECK(atomic_load_explicit(&first_file_closed, memory_order_relaxed) ==
+          0U);
+    sl_kernel32_set_last_error(0U);
+    CHECK(close_handle(arbitrary) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+
+    const uintptr_t pseudo_handles[] = {
+        UINTPTR_MAX,
+        (uintptr_t)1U,
+        (uintptr_t)2U,
+        (uintptr_t)3U,
+    };
+    for (size_t index = 0U;
+         index < sizeof(pseudo_handles) / sizeof(pseudo_handles[0]);
+         ++index) {
+        sl_kernel32_set_last_error(UINT32_C(0xabcdef01));
+        CHECK(close_handle((void *)pseudo_handles[index]) == SL_WIN32_TRUE);
+        CHECK(sl_kernel32_get_last_error() == UINT32_C(0xabcdef01));
+    }
+
+    sl_win32_thread_context first_thread = {.process = first_process};
+    sl_win32_thread_context second_thread = {.process = second_process};
+    sl_win32_context_scope first_scope;
+    sl_win32_context_scope second_scope;
+    CHECK(sl_win32_context_enter(&first_thread, &first_scope) == SL_OK);
+    CHECK(sl_win32_process_set_standard_handle(
+              first_process, SL_WIN32_STANDARD_OUTPUT,
+              (uintptr_t)first_file) == SL_OK);
+
+    sl_handle_lease held_file = {0};
+    CHECK(sl_handle_table_acquire(first_table, first_file,
+                                  SL_HANDLE_KIND_FILE, &held_file) == SL_OK);
+    CHECK(held_file.object == &first_file_closed);
+    CHECK(close_handle(first_file_value) == SL_WIN32_TRUE);
+    CHECK(atomic_load_explicit(&first_file_closed, memory_order_relaxed) ==
+          0U);
+
+    uintptr_t stored_output = 0U;
+    CHECK(sl_win32_process_get_standard_handle(
+              first_process, SL_WIN32_STANDARD_OUTPUT,
+              &stored_output) == SL_OK);
+    CHECK(stored_output == (uintptr_t)first_file);
+    sl_handle_lease rejected = {0};
+    CHECK(sl_handle_table_acquire(first_table, first_file,
+                                  SL_HANDLE_KIND_FILE,
+                                  &rejected) == SL_ERROR_HANDLE_NOT_FOUND);
+    sl_kernel32_set_last_error(0U);
+    CHECK(close_handle(first_file_value) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    sl_handle_lease_release(&held_file);
+    CHECK(atomic_load_explicit(&first_file_closed, memory_order_relaxed) ==
+          1U);
+
+    sl_kernel32_set_last_error(0U);
+    CHECK(close_handle((void *)(uintptr_t)search) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    sl_handle_lease search_lease = {0};
+    CHECK(sl_handle_table_acquire(first_table, search,
+                                  SL_HANDLE_KIND_SEARCH,
+                                  &search_lease) == SL_OK);
+    CHECK(search_lease.object == &search_closed);
+    sl_handle_lease_release(&search_lease);
+    CHECK(sl_handle_table_close(first_table, search,
+                                SL_HANDLE_KIND_SEARCH) == SL_OK);
+    CHECK(atomic_load_explicit(&search_closed, memory_order_relaxed) == 1U);
+
+    CHECK(sl_win32_context_enter(&second_thread, &second_scope) == SL_OK);
+    sl_handle_lease second_lease = {0};
+    CHECK(sl_handle_table_acquire(second_table, second_file,
+                                  SL_HANDLE_KIND_FILE,
+                                  &second_lease) == SL_OK);
+    CHECK(second_lease.object == &second_file_closed);
+    sl_handle_lease_release(&second_lease);
+    CHECK(close_handle((void *)(uintptr_t)second_file) == SL_WIN32_TRUE);
+    CHECK(atomic_load_explicit(&second_file_closed, memory_order_relaxed) ==
+          1U);
+    CHECK(atomic_load_explicit(&first_file_closed, memory_order_relaxed) ==
+          1U);
+    sl_kernel32_set_last_error(0U);
+    CHECK(close_handle((void *)(uintptr_t)second_file) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    CHECK(sl_win32_context_leave(&second_scope) == SL_OK);
+    CHECK(sl_win32_context_leave(&first_scope) == SL_OK);
+
+    CHECK(sl_win32_process_destroy(second_process) == SL_OK);
+    CHECK(sl_win32_process_destroy(first_process) == SL_OK);
+    CHECK(atomic_load_explicit(&first_file_closed, memory_order_relaxed) ==
+          1U);
+    CHECK(atomic_load_explicit(&second_file_closed, memory_order_relaxed) ==
+          1U);
+    CHECK(atomic_load_explicit(&search_closed, memory_order_relaxed) == 1U);
+    return true;
+}
+
 typedef struct {
     sl_win32_thread_context *thread;
     sl_status enter_status;
@@ -1067,6 +1216,8 @@ int main(void) {
         {"TLS concurrent index reuse", test_tls_concurrent_reuse},
         {"nested thread contexts", test_context_scopes},
         {"process-local standard handles", test_process_standard_handles},
+        {"CloseHandle process table integration",
+         test_close_handle_uses_process_table},
         {"context host-thread affinity", test_context_host_thread_affinity},
         {"context-local TLS and FLS", test_context_local_tls_and_fls},
         {"process pointer cookie", test_process_pointer_cookie},

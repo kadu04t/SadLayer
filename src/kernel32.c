@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "sadlayer/context.h"
+#include "sadlayer/handle_table.h"
 #include "sadlayer/kernel32.h"
 #include "sadlayer/process.h"
 #include "sadlayer/teb.h"
@@ -2203,6 +2204,13 @@ static sl_win32_bool SL_WINAPI sl_kernel32_close_handle(void *handle) {
     uintptr_t value = (uintptr_t)handle;
     if (value == SL_CURRENT_PROCESS_HANDLE || value == SL_STDIN_HANDLE ||
         value == SL_STDOUT_HANDLE || value == SL_STDERR_HANDLE) {
+        return SL_WIN32_TRUE;
+    }
+    sl_win32_process *process = current_process_if_installed();
+    if (process != NULL &&
+        sl_handle_table_close(sl_win32_process_handle_table(process),
+                              (sl_handle)value,
+                              SL_HANDLE_KIND_FILE) == SL_OK) {
         return SL_WIN32_TRUE;
     }
     sl_last_error = SL_ERROR_INVALID_HANDLE;

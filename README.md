@@ -46,8 +46,8 @@ The bootstrap can already:
   handle slots for `GetStdHandle`/`SetStdHandle`;
 - maintain a process-owned typed handle table whose tagged generation/slot
   tokens reject stale and wrong-kind access, while reference-counted leases keep
-  an object alive when close races an operation; this is internal plumbing for
-  future file/search objects, not a guest filesystem API yet;
+  an object alive when close races an operation; `CloseHandle` now consumes
+  `FILE` tokens, while file creation and search APIs remain future work;
 - convert explicit-length UTF-8/UTF-16 strictly or with replacement, without
   exposing Linux `wchar_t` at the Windows boundary;
 - install nestable per-thread runtime contexts and route last-error, thread

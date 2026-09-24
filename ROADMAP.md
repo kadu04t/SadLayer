@@ -116,6 +116,8 @@ Implement the minimum coherent process model rather than isolated stubs:
 - [x] Process-local typed handle core with tagged generation/slot identifiers,
   kind validation, lease-delayed destruction, stale-handle rejection, and
   cleanup owned by process destruction.
+- [x] `CloseHandle` dispatch for process-local `FILE` objects, preserving
+  pseudo handles and leaving `SEARCH` objects exclusively for `FindClose`.
 - [ ] PE TLS directory/callbacks, validated guest pointers, and coherent
   module thread data.
 - [ ] Fiber contexts and process-wide FLS callback enumeration.

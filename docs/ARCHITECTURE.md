@@ -59,8 +59,9 @@ guest x86-64 entry point            NT/process object model
   callbacks under the table lock. A clone-safe atomic snapshot protocol keeps
   the table coherent across the isolated worker's `clone`, rejecting active
   leases or destructors, while process teardown drains still-open objects after
-  guest operations are quiescent. Guest filesystem APIs are not connected to
-  this internal core yet.
+  guest operations are quiescent. `CloseHandle` dispatches only `FILE` tokens
+  into this core; `SEARCH` remains reserved for `FindClose`, and no guest file
+  creation API is connected yet.
 - `process`: owns stable per-guest process state: an OS-random pointer cookie,
   typed handle table, three atomic standard-handle slots, minimal PEB, and
   normalized process-parameters storage. Standard-handle values are isolated
@@ -110,8 +111,10 @@ guest x86-64 entry point            NT/process object model
   outside this facade. `GetStdHandle`, `SetStdHandle`, and `GetStartupInfoW`
   read the installed process's isolated slots; only the fixed bootstrap tokens
   currently identify host console streams, so assigning an arbitrary future
-  file handle cannot accidentally redirect it to `stdout`. Seven exception
-  exports connect explicit raises,
+  file handle cannot accidentally redirect it to `stdout`. `CloseHandle`
+  invalidates process-local `FILE` tokens, rejects stale or wrong-kind values,
+  and intentionally does not clear standard-handle slots that reference a
+  closed token. Seven exception exports connect explicit raises,
   process-local unhandled filtering, function lookup, virtual unwind, and
   second-pass unwind/context restoration to the static PE unwind engine. The
   subset does not yet constitute a complete loader, object, filesystem, or
