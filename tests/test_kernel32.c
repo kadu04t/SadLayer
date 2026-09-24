@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <threads.h>
+#include <unistd.h>
 
 #define CHECK(condition)                                                       \
     do {                                                                       \
@@ -133,6 +134,7 @@ static bool test_export_surface_and_abi(void) {
         "FreeEnvironmentStringsW", "GetStringTypeW",
         "LCMapStringW",          "GetFileType",
         "GetStdHandle",          "SetStdHandle",
+        "CreateFileW",           "SetFilePointerEx",
         "WriteFile",             "WriteConsoleW",
         "GetConsoleMode",        "FlushFileBuffers",
         "GetStartupInfoW",       "CloseHandle",
@@ -721,6 +723,199 @@ static bool test_close_handle_uses_process_table(void) {
     return true;
 }
 
+static bool test_console_file_object_contract(void) {
+    typedef void *(SL_WINAPI *create_file_w_function)(
+        const uint16_t *, uint32_t, uint32_t, void *, uint32_t, uint32_t,
+        void *);
+    typedef sl_win32_bool(SL_WINAPI *write_file_function)(
+        void *, const void *, uint32_t, uint32_t *, void *);
+    typedef sl_win32_bool(SL_WINAPI *write_console_w_function)(
+        void *, const uint16_t *, uint32_t, uint32_t *, void *);
+    typedef uint32_t(SL_WINAPI *get_file_type_function)(void *);
+    typedef sl_win32_bool(SL_WINAPI *get_console_mode_function)(
+        void *, uint32_t *);
+    typedef sl_win32_bool(SL_WINAPI *flush_file_buffers_function)(void *);
+    typedef sl_win32_bool(SL_WINAPI *set_file_pointer_ex_function)(
+        void *, int64_t, int64_t *, uint32_t);
+    typedef sl_win32_bool(SL_WINAPI *close_handle_function)(void *);
+    typedef void *(SL_WINAPI *get_std_handle_function)(uint32_t);
+    typedef sl_win32_bool(SL_WINAPI *set_std_handle_function)(uint32_t,
+                                                               void *);
+
+    sl_module_registry registry;
+    sl_module_registry_init(&registry);
+    CHECK(sl_kernel32_register(&registry) == SL_OK);
+
+#define LOAD_FUNCTION(export_name, destination)                                \
+    do {                                                                       \
+        sl_resolved_symbol loaded;                                             \
+        CHECK(resolve_name(&registry, (export_name), &loaded) == SL_OK);       \
+        uintptr_t loaded_address = (uintptr_t)loaded.guest_address;            \
+        _Static_assert(sizeof(destination) <= sizeof(loaded_address),          \
+                       "native function pointer does not fit uintptr_t");     \
+        memcpy(&(destination), &loaded_address, sizeof(destination));          \
+    } while (false)
+
+    create_file_w_function create_file_w = NULL;
+    write_file_function write_file = NULL;
+    write_console_w_function write_console_w = NULL;
+    get_file_type_function get_file_type = NULL;
+    get_console_mode_function get_console_mode = NULL;
+    flush_file_buffers_function flush_file_buffers = NULL;
+    set_file_pointer_ex_function set_file_pointer_ex = NULL;
+    close_handle_function close_handle = NULL;
+    get_std_handle_function get_std_handle = NULL;
+    set_std_handle_function set_std_handle = NULL;
+    LOAD_FUNCTION("CreateFileW", create_file_w);
+    LOAD_FUNCTION("WriteFile", write_file);
+    LOAD_FUNCTION("WriteConsoleW", write_console_w);
+    LOAD_FUNCTION("GetFileType", get_file_type);
+    LOAD_FUNCTION("GetConsoleMode", get_console_mode);
+    LOAD_FUNCTION("FlushFileBuffers", flush_file_buffers);
+    LOAD_FUNCTION("SetFilePointerEx", set_file_pointer_ex);
+    LOAD_FUNCTION("CloseHandle", close_handle);
+    LOAD_FUNCTION("GetStdHandle", get_std_handle);
+    LOAD_FUNCTION("SetStdHandle", set_std_handle);
+#undef LOAD_FUNCTION
+
+    const uint16_t console_name[] = {'c', 'O', 'n', 'O', 'u', 'T', '$', 0U};
+    const uint16_t unknown_name[] = {'n', 'o', 'p', 'e', 0U};
+    const uint16_t invalid_name[] = {0xd800U, 0U};
+    void *const invalid_handle = (void *)UINTPTR_MAX;
+
+    sl_kernel32_set_last_error(0U);
+    CHECK(create_file_w(console_name, UINT32_C(0x40000000), 3U, NULL, 3U,
+                        0U, NULL) == invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+
+    sl_win32_process *first_process = NULL;
+    sl_win32_process *second_process = NULL;
+    CHECK(sl_win32_process_create(&first_process) == SL_OK);
+    CHECK(sl_win32_process_create(&second_process) == SL_OK);
+    sl_win32_thread_context first_thread = {.process = first_process};
+    sl_win32_thread_context second_thread = {.process = second_process};
+    sl_win32_context_scope first_scope;
+    sl_win32_context_scope second_scope;
+    CHECK(sl_win32_context_enter(&first_thread, &first_scope) == SL_OK);
+
+    sl_kernel32_set_last_error(0U);
+    CHECK(create_file_w(NULL, UINT32_C(0x40000000), 3U, NULL, 3U, 0U,
+                        NULL) == invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(create_file_w(invalid_name, UINT32_C(0x40000000), 3U, NULL, 3U,
+                        0U, NULL) == invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 1113U);
+    CHECK(create_file_w(console_name, UINT32_C(0x40000000), 8U, NULL, 3U,
+                        0U, NULL) == invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(create_file_w(console_name, UINT32_C(0x40000000), 3U,
+                        (void *)(uintptr_t)1U, 3U, 0U, NULL) ==
+          invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(create_file_w(console_name, UINT32_C(0x40000000), 3U, NULL, 3U,
+                        1U, NULL) == invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(create_file_w(console_name, UINT32_C(0x40000000), 3U, NULL, 3U,
+                        0U, (void *)(uintptr_t)1U) == invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(create_file_w(console_name, UINT32_C(0x40000000), 3U, NULL, 1U,
+                        0U, NULL) == invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(create_file_w(unknown_name, UINT32_C(0x40000000), 3U, NULL, 3U,
+                        0U, NULL) == invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 2U);
+
+    CHECK(fflush(stdout) == 0);
+    int captured_output[2] = {-1, -1};
+    CHECK(pipe(captured_output) == 0);
+    int saved_stdout = dup(STDOUT_FILENO);
+    CHECK(saved_stdout >= 0);
+    CHECK(dup2(captured_output[1], STDOUT_FILENO) == STDOUT_FILENO);
+    CHECK(close(captured_output[1]) == 0);
+    captured_output[1] = -1;
+
+    sl_kernel32_set_last_error(UINT32_C(0x12345678));
+    void *first_handle = create_file_w(
+        console_name, UINT32_C(0x40000000), 3U, NULL, 3U, 0U, NULL);
+    CHECK(dup2(saved_stdout, STDOUT_FILENO) == STDOUT_FILENO);
+    CHECK(close(saved_stdout) == 0);
+    CHECK(first_handle != NULL && first_handle != invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x12345678));
+    sl_handle_lease lease = {0};
+    CHECK(sl_handle_table_acquire(
+              sl_win32_process_handle_table(first_process),
+              (sl_handle)(uintptr_t)first_handle, SL_HANDLE_KIND_FILE,
+              &lease) == SL_OK);
+    CHECK(lease.object != NULL);
+    sl_handle_lease_release(&lease);
+    CHECK(get_file_type(first_handle) == 2U);
+    uint32_t console_mode = UINT32_MAX;
+    CHECK(get_console_mode(first_handle, &console_mode) == SL_WIN32_TRUE);
+    CHECK(console_mode == 0U);
+
+    uint32_t transferred = UINT32_MAX;
+    CHECK(write_file(first_handle, "A", 1U, &transferred, NULL) ==
+          SL_WIN32_TRUE);
+    CHECK(transferred == 1U);
+    const uint16_t console_text[] = {0x00e9U};
+    transferred = UINT32_MAX;
+    CHECK(write_console_w(first_handle, console_text, 1U, &transferred,
+                          NULL) ==
+          SL_WIN32_TRUE);
+    CHECK(transferred == 1U);
+
+    int64_t position = INT64_C(0x12345678);
+    sl_kernel32_set_last_error(0U);
+    CHECK(set_file_pointer_ex(first_handle, 0, &position, 1U) ==
+          SL_WIN32_FALSE);
+    CHECK(position == INT64_C(0x12345678));
+    CHECK(sl_kernel32_get_last_error() == 1U);
+    sl_kernel32_set_last_error(0U);
+    CHECK(set_file_pointer_ex(first_handle, 0, &position, 3U) ==
+          SL_WIN32_FALSE);
+    CHECK(position == INT64_C(0x12345678));
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    sl_kernel32_set_last_error(0U);
+    CHECK(flush_file_buffers(first_handle) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+
+    CHECK(set_std_handle(TEST_STD_OUTPUT_ID, first_handle) == SL_WIN32_TRUE);
+    CHECK(get_std_handle(TEST_STD_OUTPUT_ID) == first_handle);
+    sl_kernel32_set_last_error(UINT32_C(0xabcdef01));
+    CHECK(close_handle(first_handle) == SL_WIN32_TRUE);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0xabcdef01));
+    char captured_bytes[3] = {0};
+    CHECK(read(captured_output[0], captured_bytes, sizeof(captured_bytes)) ==
+          (ssize_t)sizeof(captured_bytes));
+    CHECK(memcmp(captured_bytes, "A\xc3\xa9", sizeof(captured_bytes)) == 0);
+    CHECK(close(captured_output[0]) == 0);
+    CHECK(get_std_handle(TEST_STD_OUTPUT_ID) == first_handle);
+    sl_kernel32_set_last_error(0U);
+    CHECK(get_file_type(first_handle) == 0U);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    transferred = UINT32_MAX;
+    CHECK(write_file(first_handle, NULL, 0U, &transferred, NULL) ==
+          SL_WIN32_FALSE);
+    CHECK(transferred == 0U && sl_kernel32_get_last_error() == 6U);
+
+    CHECK(sl_win32_context_enter(&second_thread, &second_scope) == SL_OK);
+    sl_kernel32_set_last_error(0U);
+    CHECK(get_file_type(first_handle) == 0U);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    void *second_handle = create_file_w(
+        console_name, UINT32_C(0x40000000), 3U, NULL, 3U, 0U, NULL);
+    CHECK(second_handle != NULL && second_handle != invalid_handle);
+    CHECK(second_handle == first_handle);
+    CHECK(get_file_type(second_handle) == 2U);
+    CHECK(close_handle(second_handle) == SL_WIN32_TRUE);
+    CHECK(sl_win32_context_leave(&second_scope) == SL_OK);
+    CHECK(sl_win32_context_leave(&first_scope) == SL_OK);
+
+    CHECK(sl_win32_process_destroy(second_process) == SL_OK);
+    CHECK(sl_win32_process_destroy(first_process) == SL_OK);
+    return true;
+}
+
 typedef struct {
     sl_win32_thread_context *thread;
     sl_status enter_status;
@@ -1218,6 +1413,7 @@ int main(void) {
         {"process-local standard handles", test_process_standard_handles},
         {"CloseHandle process table integration",
          test_close_handle_uses_process_table},
+        {"console file object contract", test_console_file_object_contract},
         {"context host-thread affinity", test_context_host_thread_affinity},
         {"context-local TLS and FLS", test_context_local_tls_and_fls},
         {"process pointer cookie", test_process_pointer_cookie},

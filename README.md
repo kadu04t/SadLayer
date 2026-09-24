@@ -36,7 +36,7 @@ The bootstrap can already:
   UTF-16 copy of its guest-visible path while keeping `PEB.ImageBaseAddress`
   equal to the main mapping;
 - bind PE32/PE32+ import address tables without partial writes;
-- expose an initial 68-export `KERNEL32.dll` subset through x86-64 `ms_abi`
+- expose an initial 70-export `KERNEL32.dll` subset through x86-64 `ms_abi`
   thunks for last-error state, time/identity, heap, TLS, no-fiber FLS, critical
   sections, text conversion, process strings, locale basics, standard streams,
   pointer encoding, process-scoped PE module queries, static x64
@@ -46,8 +46,9 @@ The bootstrap can already:
   handle slots for `GetStdHandle`/`SetStdHandle`;
 - maintain a process-owned typed handle table whose tagged generation/slot
   tokens reject stale and wrong-kind access, while reference-counted leases keep
-  an object alive when close races an operation; `CloseHandle` now consumes
-  `FILE` tokens, while file creation and search APIs remain future work;
+  an object alive when close races an operation; `CreateFileW` publishes the
+  launcher's measured `CONOUT$` device as a `FILE/CHAR` token and `CloseHandle`
+  consumes it, while general disk paths and search objects remain future work;
 - convert explicit-length UTF-8/UTF-16 strictly or with replacement, without
   exposing Linux `wchar_t` at the Windows boundary;
 - install nestable per-thread runtime contexts and route last-error, thread

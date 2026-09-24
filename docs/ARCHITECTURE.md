@@ -56,12 +56,15 @@ guest x86-64 entry point            NT/process object model
   pointers. `FILE` and `SEARCH` kinds cannot be confused; acquiring a handle
   creates a reference-counted lease, close invalidates its token immediately,
   and object destruction is deferred until existing leases end without running
-  callbacks under the table lock. A clone-safe atomic snapshot protocol keeps
-  the table coherent across the isolated worker's `clone`, rejecting active
-  leases or destructors, while process teardown drains still-open objects after
-  guest operations are quiescent. `CloseHandle` dispatches only `FILE` tokens
-  into this core; `SEARCH` remains reserved for `FindClose`, and no guest file
-  creation API is connected yet.
+  callbacks under the table lock. `CreateFileW` can now publish the launcher's
+  measured `CONOUT$` request as a real `FILE/CHAR` object backed by a private
+  close-on-exec descriptor; console, write, type, flush, seek, and close APIs
+  acquire leases rather than exposing that descriptor. A clone-safe atomic
+  snapshot protocol keeps the table coherent across the isolated worker's
+  `clone`, rejecting active leases or destructors, while process teardown
+  drains still-open objects after guest operations are quiescent. `CloseHandle`
+  dispatches only `FILE` tokens into this core; `SEARCH` remains reserved for
+  `FindClose`, and general disk paths are not connected yet.
 - `process`: owns stable per-guest process state: an OS-random pointer cookie,
   typed handle table, three atomic standard-handle slots, minimal PEB, and
   normalized process-parameters storage. Standard-handle values are isolated
@@ -91,7 +94,7 @@ guest x86-64 entry point            NT/process object model
   worker installs the TEB base in GS only around guest execution and verifies
   restoration before releasing it.
 - `kernel32`: provides the first host-backed x86-64 `ms_abi` thunks. Current
-  coverage is a 68-export bootstrap subset backed by the minimal PEB/TEB
+  coverage is a 70-export bootstrap subset backed by the minimal PEB/TEB
   layouts. Module queries resolve only inside the installed process context.
   `GetModuleHandleW` and `GetModuleHandleExW` expose the main image or
   registered PE basenames; the latter can also identify a module by an address
@@ -111,7 +114,10 @@ guest x86-64 entry point            NT/process object model
   outside this facade. `GetStdHandle`, `SetStdHandle`, and `GetStartupInfoW`
   read the installed process's isolated slots; only the fixed bootstrap tokens
   currently identify host console streams, so assigning an arbitrary future
-  file handle cannot accidentally redirect it to `stdout`. `CloseHandle`
+  file handle cannot accidentally redirect it to `stdout`. The measured
+  `CreateFileW(L"CONOUT$")` path instead returns a process-local `FILE/CHAR`
+  token whose duplicated descriptor is owned until the final lease ends;
+  `SetFilePointerEx` reports that console object as non-seekable. `CloseHandle`
   invalidates process-local `FILE` tokens, rejects stale or wrong-kind values,
   and intentionally does not clear standard-handle slots that reference a
   closed token. Seven exception exports connect explicit raises,

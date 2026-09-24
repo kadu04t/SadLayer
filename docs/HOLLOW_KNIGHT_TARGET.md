@@ -22,17 +22,16 @@ The launcher imports `UnityMain2`; SadLayer resolves it to export ordinal 2 at
 RVA `0x7da7a0` in this `UnityPlayer.dll`.
 
 With the built-in KERNEL32 bootstrap subset enabled, the current launcher-only
-link check against the profiled files resolves 58 symbols and leaves 14
-unresolved. `GetModuleHandleW`, `GetModuleFileNameW`, `GetModuleHandleExW`,
-`GetProcAddress`, and `RtlPcToFileHeader` account for the five-symbol gain over
-the previous 53/19 measurement. Since that reprobe, resident-only
-`LoadLibraryExW`/`FreeLibrary` and seven x64 exception/unwind exports have joined
-the built-in surface. The next measurement should therefore reach 67 resolved
-and 5 unresolved once the Windows target files are available again. This is a
-projection, not a new measurement. The expected remainder is `FindClose`,
-`FindFirstFileExW`, `FindNextFileW`, `SetFilePointerEx`, and `CreateFileW`. IAT
-binding remains intentionally skipped until the entire launcher import set
-resolves atomically.
+link check against the profiled files resolves 69 symbols and leaves three
+unresolved: `FindClose`, `FindFirstFileExW`, and `FindNextFileW`. The check was
+rerun against the hashes recorded above after adding `CreateFileW` and
+`SetFilePointerEx`; IAT binding remains intentionally skipped until the entire
+launcher import set resolves atomically. Disassembly of the two launcher calls
+to `CreateFileW` shows the same measured request: `CONOUT$`, generic write
+access, read/write sharing, `OPEN_EXISTING`, and zero optional flags. SadLayer
+now represents that device with a process-local typed `FILE` token and accepts
+it in the console/write/type APIs. General disk paths are deliberately not
+claimed by this checkpoint.
 
 The profiled exception directories contain 323 runtime-function entries with
 137 distinct unwind records in the launcher and 103,587 entries with 67,501
@@ -79,7 +78,7 @@ host, applies its final page protections, and identifies the entry address as
 `0x140001264`. SadLayer still does not transfer control to it: the remaining
 launcher imports, recursive UnityPlayer dependency binding, initialization
 order, API Set routing, and PE TLS are explicit gates. The next
-launcher-specific work is the five filesystem/search imports followed by
+launcher-specific work is the three directory-search imports followed by
 recursive module discovery/loading.
 
 ## Direct UnityPlayer modules

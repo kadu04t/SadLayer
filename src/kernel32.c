@@ -1,12 +1,14 @@
 #define _GNU_SOURCE
 
 #include "sadlayer/context.h"
+#include "sadlayer/file.h"
 #include "sadlayer/handle_table.h"
 #include "sadlayer/kernel32.h"
 #include "sadlayer/process.h"
 #include "sadlayer/teb.h"
 #include "sadlayer/unicode.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <stdalign.h>
 #include <stdatomic.h>
@@ -25,14 +27,22 @@
 
 #define SL_ERROR_SUCCESS 0U
 #define SL_ERROR_INVALID_FUNCTION 1U
+#define SL_ERROR_FILE_NOT_FOUND 2U
+#define SL_ERROR_PATH_NOT_FOUND 3U
+#define SL_ERROR_TOO_MANY_OPEN_FILES 4U
+#define SL_ERROR_ACCESS_DENIED 5U
 #define SL_ERROR_INVALID_HANDLE 6U
 #define SL_ERROR_NOT_ENOUGH_MEMORY 8U
+#define SL_ERROR_GEN_FAILURE 31U
 #define SL_ERROR_WRITE_FAULT 29U
 #define SL_ERROR_INVALID_PARAMETER 87U
 #define SL_ERROR_INSUFFICIENT_BUFFER 122U
 #define SL_ERROR_MOD_NOT_FOUND 126U
 #define SL_ERROR_PROC_NOT_FOUND 127U
 #define SL_ERROR_INVALID_ORDINAL 182U
+#define SL_ERROR_NEGATIVE_SEEK 131U
+#define SL_ERROR_DISK_FULL 112U
+#define SL_ERROR_FILENAME_EXCED_RANGE 206U
 #define SL_ERROR_INVALID_FLAGS 1004U
 #define SL_ERROR_NO_UNICODE_TRANSLATION 1113U
 #define SL_HEAP_ZERO_MEMORY 0x00000008U
@@ -48,6 +58,17 @@
 #define SL_ENVIRONMENT_MAGIC UINT64_C(0x534c454e56424c4b)
 #define SL_COMMAND_LINE_CAPACITY 32768U
 #define SL_KERNEL32_EXPORT_CAPACITY 96U
+#define SL_WIN32_FILE_SHARE_READ 0x00000001U
+#define SL_WIN32_FILE_SHARE_WRITE 0x00000002U
+#define SL_WIN32_FILE_SHARE_DELETE 0x00000004U
+#define SL_WIN32_OPEN_EXISTING 3U
+#define SL_WIN32_FILE_ATTRIBUTE_NORMAL 0x00000080U
+#define SL_WIN32_FILE_BEGIN 0U
+#define SL_WIN32_FILE_CURRENT 1U
+#define SL_WIN32_FILE_END 2U
+#define SL_WIN32_FILE_TYPE_UNKNOWN 0U
+#define SL_WIN32_FILE_TYPE_DISK_VALUE 1U
+#define SL_WIN32_FILE_TYPE_CHAR_VALUE 2U
 
 #define SL_STD_INPUT_ID UINT32_C(0xfffffff6)
 #define SL_STD_OUTPUT_ID UINT32_C(0xfffffff5)
@@ -2080,6 +2101,165 @@ static FILE *stream_for_handle(const void *handle) {
     return NULL;
 }
 
+static uint32_t win32_error_from_host(int host_error, uint32_t fallback) {
+    switch (host_error) {
+    case EACCES:
+    case EPERM:
+    case EROFS:
+        return SL_ERROR_ACCESS_DENIED;
+    case EBADF:
+        return SL_ERROR_INVALID_HANDLE;
+    case EMFILE:
+    case ENFILE:
+        return SL_ERROR_TOO_MANY_OPEN_FILES;
+    case ENOENT:
+        return SL_ERROR_FILE_NOT_FOUND;
+    case ENOTDIR:
+        return SL_ERROR_PATH_NOT_FOUND;
+    case ENOSPC:
+        return SL_ERROR_DISK_FULL;
+    case ENAMETOOLONG:
+        return SL_ERROR_FILENAME_EXCED_RANGE;
+    case ESPIPE:
+        return SL_ERROR_INVALID_FUNCTION;
+    default:
+        return fallback;
+    }
+}
+
+static sl_status acquire_current_file(const void *handle,
+                                      sl_handle_lease *lease,
+                                      sl_win32_file **file) {
+    *lease = (sl_handle_lease){0};
+    *file = NULL;
+    sl_win32_process *process = current_process_if_installed();
+    if (process == NULL) {
+        return SL_ERROR_HANDLE_NOT_FOUND;
+    }
+    sl_status status = sl_handle_table_acquire(
+        sl_win32_process_handle_table(process),
+        (sl_handle)(uintptr_t)handle, SL_HANDLE_KIND_FILE, lease);
+    if (status == SL_OK) {
+        *file = lease->object;
+    }
+    return status;
+}
+
+static bool utf16_terminated_length(const uint16_t *text, size_t *length) {
+    if (text == NULL) {
+        return false;
+    }
+    for (size_t index = 0U; index <= SL_WIN32_IMAGE_PATH_MAX_UNITS; ++index) {
+        if (text[index] == 0U) {
+            *length = index;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool utf16_equals_ascii_case_insensitive(const uint16_t *text,
+                                                 size_t text_length,
+                                                 const char *ascii) {
+    size_t index = 0U;
+    while (index < text_length && ascii[index] != '\0') {
+        uint16_t unit = text[index];
+        unsigned char expected = (unsigned char)ascii[index];
+        if (unit >= (uint16_t)'a' && unit <= (uint16_t)'z') {
+            unit = (uint16_t)(unit - (uint16_t)'a' + (uint16_t)'A');
+        }
+        if (expected >= (unsigned char)'a' &&
+            expected <= (unsigned char)'z') {
+            expected = (unsigned char)(expected - (unsigned char)'a' +
+                                       (unsigned char)'A');
+        }
+        if (unit != (uint16_t)expected) {
+            return false;
+        }
+        ++index;
+    }
+    return index == text_length && ascii[index] == '\0';
+}
+
+static void *SL_WINAPI sl_kernel32_create_file_w(
+    const uint16_t *filename, uint32_t desired_access, uint32_t share_mode,
+    void *security_attributes, uint32_t creation_disposition,
+    uint32_t flags_and_attributes, void *template_file) {
+    const void *invalid_handle = (void *)UINTPTR_MAX;
+    size_t filename_length = 0U;
+    if (filename == NULL) {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
+        return (void *)invalid_handle;
+    }
+    if (!utf16_terminated_length(filename, &filename_length)) {
+        sl_last_error = SL_ERROR_FILENAME_EXCED_RANGE;
+        return (void *)invalid_handle;
+    }
+    size_t encoded_length = 0U;
+    if (sl_utf16_to_utf8(filename, filename_length, NULL, 0U,
+                         &encoded_length) != SL_OK) {
+        sl_last_error = SL_ERROR_NO_UNICODE_TRANSLATION;
+        return (void *)invalid_handle;
+    }
+    (void)encoded_length;
+
+    const uint32_t supported_access =
+        SL_WIN32_GENERIC_READ | SL_WIN32_GENERIC_WRITE;
+    const uint32_t supported_share =
+        SL_WIN32_FILE_SHARE_READ | SL_WIN32_FILE_SHARE_WRITE |
+        SL_WIN32_FILE_SHARE_DELETE;
+    if ((desired_access & ~supported_access) != 0U ||
+        (share_mode & ~supported_share) != 0U ||
+        security_attributes != NULL || template_file != NULL ||
+        (flags_and_attributes != 0U &&
+         flags_and_attributes != SL_WIN32_FILE_ATTRIBUTE_NORMAL)) {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
+        return (void *)invalid_handle;
+    }
+    if (creation_disposition != SL_WIN32_OPEN_EXISTING) {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
+        return (void *)invalid_handle;
+    }
+    if (!utf16_equals_ascii_case_insensitive(filename, filename_length,
+                                              "CONOUT$")) {
+        sl_last_error = SL_ERROR_FILE_NOT_FOUND;
+        return (void *)invalid_handle;
+    }
+    if (desired_access != SL_WIN32_GENERIC_WRITE ||
+        (share_mode & SL_WIN32_FILE_SHARE_WRITE) == 0U) {
+        sl_last_error = SL_ERROR_ACCESS_DENIED;
+        return (void *)invalid_handle;
+    }
+
+    sl_win32_process *process = current_process_if_installed();
+    if (process == NULL) {
+        sl_last_error = SL_ERROR_INVALID_HANDLE;
+        return (void *)invalid_handle;
+    }
+    sl_win32_file *file = NULL;
+    int host_error = 0;
+    sl_status status = sl_win32_file_open_console_output(&file, &host_error);
+    if (status != SL_OK) {
+        sl_last_error = status == SL_ERROR_OUT_OF_MEMORY
+                            ? SL_ERROR_NOT_ENOUGH_MEMORY
+                            : win32_error_from_host(host_error,
+                                                    SL_ERROR_GEN_FAILURE);
+        return (void *)invalid_handle;
+    }
+    sl_handle handle = 0U;
+    status = sl_handle_table_insert(sl_win32_process_handle_table(process),
+                                    SL_HANDLE_KIND_FILE, file,
+                                    sl_win32_file_destroy, &handle);
+    if (status != SL_OK) {
+        sl_win32_file_destroy(file);
+        sl_last_error = status == SL_ERROR_HANDLE_TABLE_FULL
+                            ? SL_ERROR_TOO_MANY_OPEN_FILES
+                            : SL_ERROR_NOT_ENOUGH_MEMORY;
+        return (void *)invalid_handle;
+    }
+    return (void *)(uintptr_t)handle;
+}
+
 static sl_win32_bool SL_WINAPI sl_kernel32_write_file(
     void *handle, const void *buffer, uint32_t byte_count,
     uint32_t *bytes_written, void *overlapped) {
@@ -2090,19 +2270,37 @@ static sl_win32_bool SL_WINAPI sl_kernel32_write_file(
         sl_last_error = SL_ERROR_INVALID_FUNCTION;
         return SL_WIN32_FALSE;
     }
-    FILE *stream = stream_for_handle(handle);
-    if (stream == NULL || bytes_written == NULL ||
-        (buffer == NULL && byte_count != 0U)) {
-        sl_last_error = stream == NULL ? SL_ERROR_INVALID_HANDLE
-                                       : SL_ERROR_INVALID_PARAMETER;
+    if (bytes_written == NULL || (buffer == NULL && byte_count != 0U)) {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
         return SL_WIN32_FALSE;
     }
-    size_t written = fwrite(buffer, 1U, byte_count, stream);
-    if (bytes_written != NULL) {
+
+    FILE *stream = stream_for_handle(handle);
+    if (stream != NULL) {
+        size_t written = fwrite(buffer, 1U, byte_count, stream);
         *bytes_written = (uint32_t)written;
+        if (written != byte_count) {
+            sl_last_error = SL_ERROR_WRITE_FAULT;
+            return SL_WIN32_FALSE;
+        }
+        return SL_WIN32_TRUE;
     }
-    if (written != byte_count) {
-        sl_last_error = SL_ERROR_WRITE_FAULT;
+
+    sl_handle_lease lease = {0};
+    sl_win32_file *file = NULL;
+    if (acquire_current_file(handle, &lease, &file) != SL_OK) {
+        sl_last_error = SL_ERROR_INVALID_HANDLE;
+        return SL_WIN32_FALSE;
+    }
+    size_t written = 0U;
+    int host_error = 0;
+    sl_status status = sl_win32_file_write(
+        file, buffer, (size_t)byte_count, &written, &host_error);
+    sl_handle_lease_release(&lease);
+    *bytes_written = (uint32_t)written;
+    if (status != SL_OK) {
+        sl_last_error = win32_error_from_host(host_error,
+                                              SL_ERROR_WRITE_FAULT);
         return SL_WIN32_FALSE;
     }
     return SL_WIN32_TRUE;
@@ -2116,20 +2314,34 @@ static sl_win32_bool SL_WINAPI sl_kernel32_write_console_w(
         *characters_written = 0U;
     }
     FILE *stream = stream_for_handle(handle);
-    if (stream == NULL || (text == NULL && character_count != 0U)) {
-        sl_last_error = stream == NULL ? SL_ERROR_INVALID_HANDLE
-                                       : SL_ERROR_INVALID_PARAMETER;
+    sl_handle_lease lease = {0};
+    sl_win32_file *file = NULL;
+    if (stream == NULL && acquire_current_file(handle, &lease, &file) != SL_OK) {
+        sl_last_error = SL_ERROR_INVALID_HANDLE;
+        return SL_WIN32_FALSE;
+    }
+    if (file != NULL &&
+        sl_win32_file_get_type(file) != SL_WIN32_FILE_TYPE_CHAR) {
+        sl_handle_lease_release(&lease);
+        sl_last_error = SL_ERROR_INVALID_HANDLE;
+        return SL_WIN32_FALSE;
+    }
+    if (text == NULL && character_count != 0U) {
+        sl_handle_lease_release(&lease);
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
         return SL_WIN32_FALSE;
     }
     size_t byte_count = 0U;
     sl_status status = sl_utf16_to_utf8_lossy(
         text, character_count, NULL, 0U, &byte_count);
     if (status != SL_OK) {
+        sl_handle_lease_release(&lease);
         sl_last_error = SL_ERROR_INVALID_PARAMETER;
         return SL_WIN32_FALSE;
     }
     char *encoded = malloc(byte_count == 0U ? 1U : byte_count);
     if (encoded == NULL) {
+        sl_handle_lease_release(&lease);
         sl_last_error = SL_ERROR_NOT_ENOUGH_MEMORY;
         return SL_WIN32_FALSE;
     }
@@ -2138,13 +2350,24 @@ static sl_win32_bool SL_WINAPI sl_kernel32_write_console_w(
                                     &converted);
     if (status != SL_OK || converted != byte_count) {
         free(encoded);
+        sl_handle_lease_release(&lease);
         sl_last_error = SL_ERROR_INVALID_PARAMETER;
         return SL_WIN32_FALSE;
     }
-    size_t bytes_written = fwrite(encoded, 1U, byte_count, stream);
+    size_t bytes_written = 0U;
+    int host_error = 0;
+    if (stream != NULL) {
+        bytes_written = fwrite(encoded, 1U, byte_count, stream);
+        status = bytes_written == byte_count ? SL_OK : SL_ERROR_IO;
+    } else {
+        status = sl_win32_file_write(file, encoded, byte_count,
+                                     &bytes_written, &host_error);
+    }
     free(encoded);
-    if (bytes_written != byte_count) {
-        sl_last_error = SL_ERROR_WRITE_FAULT;
+    sl_handle_lease_release(&lease);
+    if (status != SL_OK || bytes_written != byte_count) {
+        sl_last_error = win32_error_from_host(host_error,
+                                              SL_ERROR_WRITE_FAULT);
         return SL_WIN32_FALSE;
     }
     if (characters_written != NULL) {
@@ -2156,10 +2379,20 @@ static sl_win32_bool SL_WINAPI sl_kernel32_write_console_w(
 static sl_win32_bool SL_WINAPI sl_kernel32_get_console_mode(void *handle,
                                                              uint32_t *mode) {
     bool is_input = (uintptr_t)handle == SL_STDIN_HANDLE;
-    if ((stream_for_handle(handle) == NULL && !is_input) || mode == NULL) {
-        sl_last_error = mode == NULL ? SL_ERROR_INVALID_PARAMETER
-                                     : SL_ERROR_INVALID_HANDLE;
+    if (mode == NULL) {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
         return SL_WIN32_FALSE;
+    }
+    if (stream_for_handle(handle) == NULL && !is_input) {
+        sl_handle_lease lease = {0};
+        sl_win32_file *file = NULL;
+        if (acquire_current_file(handle, &lease, &file) != SL_OK ||
+            sl_win32_file_get_type(file) != SL_WIN32_FILE_TYPE_CHAR) {
+            sl_handle_lease_release(&lease);
+            sl_last_error = SL_ERROR_INVALID_HANDLE;
+            return SL_WIN32_FALSE;
+        }
+        sl_handle_lease_release(&lease);
     }
     *mode = 0U;
     return SL_WIN32_TRUE;
@@ -2168,21 +2401,87 @@ static sl_win32_bool SL_WINAPI sl_kernel32_get_console_mode(void *handle,
 static uint32_t SL_WINAPI sl_kernel32_get_file_type(void *handle) {
     if (stream_for_handle(handle) != NULL ||
         (uintptr_t)handle == SL_STDIN_HANDLE) {
-        return 2U; /* FILE_TYPE_CHAR */
+        return SL_WIN32_FILE_TYPE_CHAR_VALUE;
+    }
+    sl_handle_lease lease = {0};
+    sl_win32_file *file = NULL;
+    if (acquire_current_file(handle, &lease, &file) == SL_OK) {
+        sl_win32_file_type type = sl_win32_file_get_type(file);
+        sl_handle_lease_release(&lease);
+        return type == SL_WIN32_FILE_TYPE_DISK
+                   ? SL_WIN32_FILE_TYPE_DISK_VALUE
+                   : SL_WIN32_FILE_TYPE_CHAR_VALUE;
     }
     sl_last_error = SL_ERROR_INVALID_HANDLE;
-    return 0U; /* FILE_TYPE_UNKNOWN */
+    return SL_WIN32_FILE_TYPE_UNKNOWN;
 }
 
 static sl_win32_bool SL_WINAPI sl_kernel32_flush_file_buffers(void *handle) {
-    FILE *stream = stream_for_handle(handle);
-    if (stream == NULL) {
+    if (stream_for_handle(handle) != NULL ||
+        (uintptr_t)handle == SL_STDIN_HANDLE) {
         sl_last_error = SL_ERROR_INVALID_HANDLE;
         return SL_WIN32_FALSE;
     }
-    if (fflush(stream) != 0) {
-        sl_last_error = SL_ERROR_WRITE_FAULT;
+    sl_handle_lease lease = {0};
+    sl_win32_file *file = NULL;
+    if (acquire_current_file(handle, &lease, &file) != SL_OK) {
+        sl_last_error = SL_ERROR_INVALID_HANDLE;
         return SL_WIN32_FALSE;
+    }
+    int host_error = 0;
+    sl_status status = sl_win32_file_flush(file, &host_error);
+    sl_handle_lease_release(&lease);
+    if (status != SL_OK) {
+        sl_last_error = win32_error_from_host(host_error,
+                                              SL_ERROR_GEN_FAILURE);
+        return SL_WIN32_FALSE;
+    }
+    return SL_WIN32_TRUE;
+}
+
+static sl_win32_bool SL_WINAPI sl_kernel32_set_file_pointer_ex(
+    void *handle, int64_t distance, int64_t *new_position,
+    uint32_t move_method) {
+    sl_win32_file_seek_origin origin;
+    if (move_method == SL_WIN32_FILE_BEGIN) {
+        if (distance < 0) {
+            sl_last_error = SL_ERROR_INVALID_PARAMETER;
+            return SL_WIN32_FALSE;
+        }
+        origin = SL_WIN32_FILE_SEEK_BEGIN;
+    } else if (move_method == SL_WIN32_FILE_CURRENT) {
+        origin = SL_WIN32_FILE_SEEK_CURRENT;
+    } else if (move_method == SL_WIN32_FILE_END) {
+        origin = SL_WIN32_FILE_SEEK_END;
+    } else {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
+        return SL_WIN32_FALSE;
+    }
+
+    sl_handle_lease lease = {0};
+    sl_win32_file *file = NULL;
+    if (acquire_current_file(handle, &lease, &file) != SL_OK) {
+        sl_last_error = SL_ERROR_INVALID_HANDLE;
+        return SL_WIN32_FALSE;
+    }
+    uint64_t position = 0U;
+    int host_error = 0;
+    sl_status status = sl_win32_file_seek(file, distance, origin, &position,
+                                         &host_error);
+    sl_handle_lease_release(&lease);
+    if (status != SL_OK) {
+        sl_last_error = host_error == EINVAL
+                            ? SL_ERROR_NEGATIVE_SEEK
+                            : win32_error_from_host(host_error,
+                                                    SL_ERROR_INVALID_FUNCTION);
+        return SL_WIN32_FALSE;
+    }
+    if (position > INT64_MAX) {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
+        return SL_WIN32_FALSE;
+    }
+    if (new_position != NULL) {
+        *new_position = (int64_t)position;
     }
     return SL_WIN32_TRUE;
 }
@@ -2376,6 +2675,8 @@ static void initialize_kernel32_exports(void) {
                   sl_kernel32_get_std_handle);
     SL_ADD_EXPORT(exports, export_count, "SetStdHandle",
                   sl_kernel32_set_std_handle);
+    SL_ADD_EXPORT(exports, export_count, "CreateFileW",
+                  sl_kernel32_create_file_w);
     SL_ADD_EXPORT(exports, export_count, "WriteFile",
                   sl_kernel32_write_file);
     SL_ADD_EXPORT(exports, export_count, "WriteConsoleW",
@@ -2386,6 +2687,8 @@ static void initialize_kernel32_exports(void) {
                   sl_kernel32_get_file_type);
     SL_ADD_EXPORT(exports, export_count, "FlushFileBuffers",
                   sl_kernel32_flush_file_buffers);
+    SL_ADD_EXPORT(exports, export_count, "SetFilePointerEx",
+                  sl_kernel32_set_file_pointer_ex);
     SL_ADD_EXPORT(exports, export_count, "GetStartupInfoW",
                   sl_kernel32_get_startup_info_w);
     SL_ADD_EXPORT(exports, export_count, "CloseHandle",

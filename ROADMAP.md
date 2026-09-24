@@ -124,7 +124,8 @@ Implement the minimum coherent process model rather than isolated stubs:
 - [ ] Current directory, Windows path normalization, virtual memory, files,
   directories, mappings, waits, synchronization objects, and threads.
 - [ ] Remaining launcher imports: recursive module discovery/loading and the
-  five filesystem search/file-positioning APIs.
+  three directory-search APIs. The measured `CONOUT$` creation path and file
+  positioning export are now present.
 - [ ] Registry overlay stored inside a SadLayer prefix.
 
 Exit gate: purpose-built PE conformance programs pass file, memory, threading,
@@ -142,7 +143,8 @@ TLS, timing, environment, and loader tests under SadLayer.
    stack before the worker exits.
 5. [x] Implement the launcher's static x64 exception/unwind surface, including
    guest-handler continuation and handler-initiated second-pass unwind.
-6. [ ] Complete the launcher's remaining KERNEL32 filesystem/search imports.
+6. [ ] Complete the launcher's three remaining KERNEL32 directory-search
+   imports.
 7. [ ] Recursively load, relocate, and bind UnityPlayer and its dependency
    graph; the current link check only examines the executable.
 8. [ ] Populate real API Set contract mappings—the manual alias primitive is
