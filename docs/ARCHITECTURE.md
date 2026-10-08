@@ -51,6 +51,15 @@ guest x86-64 entry point            NT/process object model
   only an immutable view and process destruction owns its cleanup.
 - `unicode`: validates and converts explicit-length UTF-8/UTF-16 buffers without
   using the incompatible Linux `wchar_t` representation.
+- `search`: streams relative directory searches from a fresh descriptor rooted
+  below the process filesystem directory. Parent traversal is normalized
+  without permitting an escape, every directory component is opened without
+  following symlinks, and raw `getdents64` records are validated before names
+  or metadata are consumed. Matching currently implements `*`, `?`, the Win32
+  `*.*` match-all convention, and optional ASCII case sensitivity; complete DOS
+  wildcard/case-folding semantics, short names, and full Windows attributes are
+  later compatibility work. The backend omits `.` and `..`, invalid host UTF-8
+  names, and results that do not fit `WIN32_FIND_DATAW`.
 - `handle_table`: owns 256 typed object slots per guest process. Handles are
   opaque tagged generation/slot tokens, never Linux descriptors or host
   pointers. `FILE` and `SEARCH` kinds cannot be confused; acquiring a handle
