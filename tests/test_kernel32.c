@@ -1,15 +1,21 @@
+#define _GNU_SOURCE
+
 #include "sadlayer/context.h"
 #include "sadlayer/handle_table.h"
 #include "sadlayer/kernel32.h"
 #include "sadlayer/module.h"
 #include "sadlayer/pe.h"
+#include "sadlayer/search.h"
 
+#include <fcntl.h>
 #include <stdalign.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <threads.h>
 #include <unistd.h>
 
@@ -137,6 +143,8 @@ static bool test_export_surface_and_abi(void) {
         "CreateFileW",           "SetFilePointerEx",
         "WriteFile",             "WriteConsoleW",
         "GetConsoleMode",        "FlushFileBuffers",
+        "FindFirstFileExW",      "FindNextFileW",
+        "FindClose",
         "GetStartupInfoW",       "CloseHandle",
         "ExitProcess",           "TerminateProcess",
     };
@@ -580,8 +588,39 @@ static void count_closed_handle(void *opaque) {
     (void)atomic_fetch_add_explicit(closed, 1U, memory_order_relaxed);
 }
 
+static bool create_search_test_file(const char *path) {
+    int descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (descriptor < 0) {
+        return false;
+    }
+    return close(descriptor) == 0;
+}
+
+static bool find_name_equals_ascii(const uint16_t *name,
+                                   const char *expected) {
+    size_t index = 0U;
+    while (expected[index] != '\0') {
+        if (name[index] != (uint16_t)(unsigned char)expected[index]) {
+            return false;
+        }
+        ++index;
+    }
+    return name[index] == 0U;
+}
+
+static uint32_t search_test_name_bit(const uint16_t *name) {
+    if (find_name_equals_ascii(name, "first.dll")) {
+        return 1U;
+    }
+    if (find_name_equals_ascii(name, "second.dll")) {
+        return 2U;
+    }
+    return 0U;
+}
+
 static bool test_close_handle_uses_process_table(void) {
     typedef sl_win32_bool(SL_WINAPI *close_handle_function)(void *);
+    typedef sl_win32_bool(SL_WINAPI *find_close_function)(void *);
 
     sl_module_registry registry;
     sl_module_registry_init(&registry);
@@ -593,6 +632,12 @@ static bool test_close_handle_uses_process_table(void) {
     _Static_assert(sizeof(close_handle) <= sizeof(address),
                    "native function pointer does not fit uintptr_t");
     memcpy(&close_handle, &address, sizeof(close_handle));
+    CHECK(resolve_name(&registry, "FindClose", &resolved) == SL_OK);
+    address = (uintptr_t)resolved.guest_address;
+    find_close_function find_close = NULL;
+    _Static_assert(sizeof(find_close) <= sizeof(address),
+                   "native function pointer does not fit uintptr_t");
+    memcpy(&find_close, &address, sizeof(find_close));
 
     sl_win32_process *first_process = NULL;
     sl_win32_process *second_process = NULL;
@@ -658,6 +703,12 @@ static bool test_close_handle_uses_process_table(void) {
               first_process, SL_WIN32_STANDARD_OUTPUT,
               (uintptr_t)first_file) == SL_OK);
 
+    sl_kernel32_set_last_error(0U);
+    CHECK(find_close(first_file_value) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    CHECK(atomic_load_explicit(&first_file_closed, memory_order_relaxed) ==
+          0U);
+
     sl_handle_lease held_file = {0};
     CHECK(sl_handle_table_acquire(first_table, first_file,
                                   SL_HANDLE_KIND_FILE, &held_file) == SL_OK);
@@ -691,9 +742,13 @@ static bool test_close_handle_uses_process_table(void) {
                                   &search_lease) == SL_OK);
     CHECK(search_lease.object == &search_closed);
     sl_handle_lease_release(&search_lease);
-    CHECK(sl_handle_table_close(first_table, search,
-                                SL_HANDLE_KIND_SEARCH) == SL_OK);
+    sl_kernel32_set_last_error(UINT32_C(0xa5a5a5a5));
+    CHECK(find_close((void *)(uintptr_t)search) == SL_WIN32_TRUE);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0xa5a5a5a5));
     CHECK(atomic_load_explicit(&search_closed, memory_order_relaxed) == 1U);
+    sl_kernel32_set_last_error(0U);
+    CHECK(find_close((void *)(uintptr_t)search) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
 
     CHECK(sl_win32_context_enter(&second_thread, &second_scope) == SL_OK);
     sl_handle_lease second_lease = {0};
@@ -720,6 +775,243 @@ static bool test_close_handle_uses_process_table(void) {
     CHECK(atomic_load_explicit(&second_file_closed, memory_order_relaxed) ==
           1U);
     CHECK(atomic_load_explicit(&search_closed, memory_order_relaxed) == 1U);
+    return true;
+}
+
+static bool test_find_file_iteration_contract(void) {
+    typedef void *(SL_WINAPI *find_first_file_ex_w_function)(
+        const uint16_t *, uint32_t, sl_win32_find_data_w *, uint32_t, void *,
+        uint32_t);
+    typedef sl_win32_bool(SL_WINAPI *find_next_file_w_function)(
+        void *, sl_win32_find_data_w *);
+    typedef sl_win32_bool(SL_WINAPI *find_close_function)(void *);
+    typedef sl_win32_bool(SL_WINAPI *close_handle_function)(void *);
+
+    sl_module_registry registry;
+    sl_module_registry_init(&registry);
+    CHECK(sl_kernel32_register(&registry) == SL_OK);
+
+#define LOAD_FIND_FUNCTION(export_name, destination)                           \
+    do {                                                                       \
+        sl_resolved_symbol loaded;                                             \
+        CHECK(resolve_name(&registry, (export_name), &loaded) == SL_OK);       \
+        uintptr_t loaded_address = (uintptr_t)loaded.guest_address;            \
+        _Static_assert(sizeof(destination) <= sizeof(loaded_address),          \
+                       "native function pointer does not fit uintptr_t");     \
+        memcpy(&(destination), &loaded_address, sizeof(destination));          \
+    } while (false)
+
+    find_first_file_ex_w_function find_first_file_ex_w = NULL;
+    find_next_file_w_function find_next_file_w = NULL;
+    find_close_function find_close = NULL;
+    close_handle_function close_handle = NULL;
+    LOAD_FIND_FUNCTION("FindFirstFileExW", find_first_file_ex_w);
+    LOAD_FIND_FUNCTION("FindNextFileW", find_next_file_w);
+    LOAD_FIND_FUNCTION("FindClose", find_close);
+    LOAD_FIND_FUNCTION("CloseHandle", close_handle);
+#undef LOAD_FIND_FUNCTION
+
+    static const uint16_t dll_pattern[] = {
+        '*', '.', 'D', 'L', 'L', 0U,
+    };
+    static const uint16_t no_match_pattern[] = {
+        'm', 'i', 's', 's', 'i', 'n', 'g', '-', '*', 0U,
+    };
+    static const uint16_t all_pattern[] = {'*', 0U};
+    static const uint16_t missing_directory_pattern[] = {
+        'a', 'b', 's', 'e', 'n', 't', '\\', '*', 0U,
+    };
+    static const uint16_t invalid_name[] = {0xd800U, 0U};
+    static const uint16_t absolute_pattern[] = {'/', '*', 0U};
+    void *const invalid_handle = (void *)UINTPTR_MAX;
+
+    sl_win32_find_data_w data;
+    memset(&data, 0x5a, sizeof(data));
+    sl_win32_find_data_w unchanged = data;
+    sl_kernel32_set_last_error(0U);
+    CHECK(find_first_file_ex_w(dll_pattern, 0U, &data, 0U, NULL, 0U) ==
+          invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    CHECK(memcmp(&data, &unchanged, sizeof(data)) == 0);
+
+    char root_template[] = "/tmp/sadlayer-find-XXXXXX";
+    char *root = mkdtemp(root_template);
+    CHECK(root != NULL);
+    char first_path[128];
+    char second_path[128];
+    char skipped_path[128];
+    char directory_path[128];
+    CHECK(snprintf(first_path, sizeof(first_path), "%s/first.dll", root) >
+          0);
+    CHECK(snprintf(second_path, sizeof(second_path), "%s/second.dll", root) >
+          0);
+    CHECK(snprintf(skipped_path, sizeof(skipped_path), "%s/skip.txt", root) >
+          0);
+    CHECK(snprintf(directory_path, sizeof(directory_path), "%s/folder",
+                   root) > 0);
+    CHECK(create_search_test_file(first_path));
+    CHECK(create_search_test_file(second_path));
+    CHECK(create_search_test_file(skipped_path));
+    CHECK(mkdir(directory_path, 0700) == 0);
+
+    sl_win32_process *unconfigured_process = NULL;
+    CHECK(sl_win32_process_create(&unconfigured_process) == SL_OK);
+    sl_win32_thread_context unconfigured_thread = {
+        .process = unconfigured_process,
+    };
+    sl_win32_context_scope unconfigured_scope;
+    CHECK(sl_win32_context_enter(&unconfigured_thread,
+                                 &unconfigured_scope) == SL_OK);
+    sl_kernel32_set_last_error(0U);
+    CHECK(find_first_file_ex_w(dll_pattern, 0U, &data, 0U, NULL, 0U) ==
+          invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 3U);
+    CHECK(sl_win32_context_leave(&unconfigured_scope) == SL_OK);
+    CHECK(sl_win32_process_destroy(unconfigured_process) == SL_OK);
+
+    sl_win32_process *process = NULL;
+    CHECK(sl_win32_process_create(&process) == SL_OK);
+    CHECK(sl_win32_process_set_filesystem_directory(process, root) == SL_OK);
+    sl_win32_thread_context thread = {.process = process};
+    sl_win32_context_scope scope;
+    CHECK(sl_win32_context_enter(&thread, &scope) == SL_OK);
+
+    sl_kernel32_set_last_error(0U);
+    CHECK(find_first_file_ex_w(NULL, 0U, &data, 0U, NULL, 0U) ==
+          invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(find_first_file_ex_w(dll_pattern, 0U, NULL, 0U, NULL, 0U) ==
+          invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(find_first_file_ex_w(dll_pattern, 2U, &data, 0U, NULL, 0U) ==
+          invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(find_first_file_ex_w(dll_pattern, 0U, &data, 2U, NULL, 0U) ==
+          invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 50U);
+    CHECK(find_first_file_ex_w(dll_pattern, 0U, &data, 3U, NULL, 0U) ==
+          invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(find_first_file_ex_w(dll_pattern, 0U, &data, 0U,
+                               (void *)(uintptr_t)1U, 0U) == invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(find_first_file_ex_w(dll_pattern, 0U, &data, 0U, NULL, 8U) ==
+          invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+    CHECK(find_first_file_ex_w(invalid_name, 0U, &data, 0U, NULL, 0U) ==
+          invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 1113U);
+    CHECK(find_first_file_ex_w(absolute_pattern, 0U, &data, 0U, NULL, 0U) ==
+          invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 123U);
+
+    memset(&data, 0x5a, sizeof(data));
+    unchanged = data;
+    CHECK(find_first_file_ex_w(no_match_pattern, 1U, &data, 0U, NULL,
+                               2U | 4U) == invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 2U);
+    CHECK(memcmp(&data, &unchanged, sizeof(data)) == 0);
+    CHECK(find_first_file_ex_w(missing_directory_pattern, 0U, &data, 0U,
+                               NULL, 0U) == invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 3U);
+    CHECK(memcmp(&data, &unchanged, sizeof(data)) == 0);
+
+    CHECK(find_first_file_ex_w(dll_pattern, 0U, &data, 0U, NULL, 1U) ==
+          invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == 2U);
+    CHECK(memcmp(&data, &unchanged, sizeof(data)) == 0);
+
+    sl_kernel32_set_last_error(UINT32_C(0x10203040));
+    void *directory_search = find_first_file_ex_w(
+        all_pattern, 0U, &data, 1U, NULL, 0U);
+    CHECK(directory_search != NULL && directory_search != invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x10203040));
+    CHECK(find_name_equals_ascii(data.file_name, "folder"));
+    memset(&data, 0x69, sizeof(data));
+    unchanged = data;
+    CHECK(find_next_file_w(directory_search, &data) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 18U);
+    CHECK(memcmp(&data, &unchanged, sizeof(data)) == 0);
+    CHECK(find_close(directory_search) == SL_WIN32_TRUE);
+
+    sl_kernel32_set_last_error(UINT32_C(0x12345678));
+    void *search_handle = find_first_file_ex_w(
+        dll_pattern, 0U, &data, 0U, NULL, 0U);
+    CHECK(search_handle != NULL && search_handle != invalid_handle);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0x12345678));
+
+    sl_handle_lease search_lease = {0};
+    sl_handle_table *table = sl_win32_process_handle_table(process);
+    CHECK(sl_handle_table_acquire(table, (sl_handle)(uintptr_t)search_handle,
+                                  SL_HANDLE_KIND_SEARCH,
+                                  &search_lease) == SL_OK);
+    CHECK(search_lease.object != NULL);
+    sl_handle_lease_release(&search_lease);
+    sl_handle_lease wrong_kind = {0};
+    CHECK(sl_handle_table_acquire(table, (sl_handle)(uintptr_t)search_handle,
+                                  SL_HANDLE_KIND_FILE,
+                                  &wrong_kind) ==
+          SL_ERROR_HANDLE_TYPE_MISMATCH);
+
+    sl_kernel32_set_last_error(0U);
+    CHECK(close_handle(search_handle) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    CHECK(find_next_file_w(search_handle, NULL) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 87U);
+
+    uint32_t observed_names = search_test_name_bit(data.file_name);
+    CHECK(observed_names != 0U);
+    for (;;) {
+        sl_win32_find_data_w next_data;
+        memset(&next_data, 0xa5, sizeof(next_data));
+        sl_win32_find_data_w next_unchanged = next_data;
+        sl_kernel32_set_last_error(UINT32_C(0x87654321));
+        if (find_next_file_w(search_handle, &next_data) == SL_WIN32_FALSE) {
+            CHECK(sl_kernel32_get_last_error() == 18U);
+            CHECK(memcmp(&next_data, &next_unchanged,
+                         sizeof(next_data)) == 0);
+            break;
+        }
+        CHECK(sl_kernel32_get_last_error() == UINT32_C(0x87654321));
+        uint32_t bit = search_test_name_bit(next_data.file_name);
+        CHECK(bit != 0U && (observed_names & bit) == 0U);
+        observed_names |= bit;
+    }
+    CHECK(observed_names == 3U);
+
+    sl_win32_find_data_w exhausted_data;
+    memset(&exhausted_data, 0x3c, sizeof(exhausted_data));
+    sl_win32_find_data_w exhausted_unchanged = exhausted_data;
+    CHECK(find_next_file_w(search_handle, &exhausted_data) ==
+          SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 18U);
+    CHECK(memcmp(&exhausted_data, &exhausted_unchanged,
+                 sizeof(exhausted_data)) == 0);
+
+    sl_win32_find_data_w invalid_handle_data;
+    memset(&invalid_handle_data, 0xc3, sizeof(invalid_handle_data));
+    sl_win32_find_data_w invalid_handle_unchanged = invalid_handle_data;
+    CHECK(find_next_file_w((void *)(uintptr_t)0x12345678U,
+                           &invalid_handle_data) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    CHECK(memcmp(&invalid_handle_data, &invalid_handle_unchanged,
+                 sizeof(invalid_handle_data)) == 0);
+
+    sl_kernel32_set_last_error(UINT32_C(0xabcdef01));
+    CHECK(find_close(search_handle) == SL_WIN32_TRUE);
+    CHECK(sl_kernel32_get_last_error() == UINT32_C(0xabcdef01));
+    CHECK(find_next_file_w(search_handle, &data) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+    CHECK(find_close(search_handle) == SL_WIN32_FALSE);
+    CHECK(sl_kernel32_get_last_error() == 6U);
+
+    CHECK(sl_win32_context_leave(&scope) == SL_OK);
+    CHECK(sl_win32_process_destroy(process) == SL_OK);
+    CHECK(unlink(skipped_path) == 0);
+    CHECK(unlink(second_path) == 0);
+    CHECK(unlink(first_path) == 0);
+    CHECK(rmdir(directory_path) == 0);
+    CHECK(rmdir(root) == 0);
     return true;
 }
 
@@ -1413,6 +1705,7 @@ int main(void) {
         {"process-local standard handles", test_process_standard_handles},
         {"CloseHandle process table integration",
          test_close_handle_uses_process_table},
+        {"Find file iteration contract", test_find_file_iteration_contract},
         {"console file object contract", test_console_file_object_contract},
         {"context host-thread affinity", test_context_host_thread_affinity},
         {"context-local TLS and FLS", test_context_local_tls_and_fls},

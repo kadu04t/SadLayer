@@ -69,11 +69,10 @@ its real entry point and returns the expected code to the host.
 The guarded synthetic gate is satisfied, including fixed crash context from an
 alternate stack after the guest destroys RSP and hits a guard page. Arbitrary
 PE input remains disabled until the loader can bind the complete dependency
-graph and provide the remaining launcher runtime contracts. Module aliases are
-only the routing substrate, and the owned space does not discover or initialize
+graph and provide its initialization contracts. Module aliases are only the
+routing substrate, and the owned space does not discover or initialize
 dependencies yet; process adoption freezes one explicitly prepared space rather
-than loading a graph, and no Windows API Set schema or target mapping is
-claimed.
+than loading a graph, and no Windows API Set schema or target mapping is claimed.
 
 ## Stage 2 — NT and kernel32 foundation
 
@@ -117,15 +116,20 @@ Implement the minimum coherent process model rather than isolated stubs:
   kind validation, lease-delayed destruction, stale-handle rejection, and
   cleanup owned by process destruction.
 - [x] `CloseHandle` dispatch for process-local `FILE` objects, preserving
-  pseudo handles and leaving `SEARCH` objects exclusively for `FindClose`.
+  pseudo handles, while `FindClose` exclusively closes `SEARCH` objects.
+- [x] Root-confined relative directory search plus `FindFirstFileExW`,
+  `FindNextFileW`, and `FindClose`, with streaming results, process-local typed
+  handles, and atomic output/error behavior.
 - [ ] PE TLS directory/callbacks, validated guest pointers, and coherent
   module thread data.
 - [ ] Fiber contexts and process-wide FLS callback enumeration.
 - [ ] Current directory, Windows path normalization, virtual memory, files,
   directories, mappings, waits, synchronization objects, and threads.
-- [ ] Remaining launcher imports: recursive module discovery/loading and the
-  three directory-search APIs. The measured `CONOUT$` creation path and file
-  positioning export are now present.
+- [x] Complete the profiled launcher's static import surface: all 72 symbols
+  resolve and its IAT binds atomically when the matching `UnityPlayer.dll` is
+  supplied explicitly.
+- [ ] Recursive module discovery/loading for UnityPlayer and its dependency
+  graph, followed by dependency initialization.
 - [ ] Registry overlay stored inside a SadLayer prefix.
 
 Exit gate: purpose-built PE conformance programs pass file, memory, threading,
@@ -143,8 +147,8 @@ TLS, timing, environment, and loader tests under SadLayer.
    stack before the worker exits.
 5. [x] Implement the launcher's static x64 exception/unwind surface, including
    guest-handler continuation and handler-initiated second-pass unwind.
-6. [ ] Complete the launcher's three remaining KERNEL32 directory-search
-   imports.
+6. [x] Complete the launcher's three KERNEL32 directory-search imports and
+   reproduce 72/72 resolution with a fully bound launcher IAT.
 7. [ ] Recursively load, relocate, and bind UnityPlayer and its dependency
    graph; the current link check only examines the executable.
 8. [ ] Populate real API Set contract mappings—the manual alias primitive is

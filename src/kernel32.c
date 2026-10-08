@@ -5,6 +5,7 @@
 #include "sadlayer/handle_table.h"
 #include "sadlayer/kernel32.h"
 #include "sadlayer/process.h"
+#include "sadlayer/search.h"
 #include "sadlayer/teb.h"
 #include "sadlayer/unicode.h"
 
@@ -33,10 +34,13 @@
 #define SL_ERROR_ACCESS_DENIED 5U
 #define SL_ERROR_INVALID_HANDLE 6U
 #define SL_ERROR_NOT_ENOUGH_MEMORY 8U
+#define SL_ERROR_NO_MORE_FILES 18U
 #define SL_ERROR_GEN_FAILURE 31U
 #define SL_ERROR_WRITE_FAULT 29U
+#define SL_ERROR_NOT_SUPPORTED 50U
 #define SL_ERROR_INVALID_PARAMETER 87U
 #define SL_ERROR_INSUFFICIENT_BUFFER 122U
+#define SL_ERROR_INVALID_NAME 123U
 #define SL_ERROR_MOD_NOT_FOUND 126U
 #define SL_ERROR_PROC_NOT_FOUND 127U
 #define SL_ERROR_INVALID_ORDINAL 182U
@@ -69,6 +73,17 @@
 #define SL_WIN32_FILE_TYPE_UNKNOWN 0U
 #define SL_WIN32_FILE_TYPE_DISK_VALUE 1U
 #define SL_WIN32_FILE_TYPE_CHAR_VALUE 2U
+#define SL_FIND_EX_INFO_STANDARD 0U
+#define SL_FIND_EX_INFO_BASIC 1U
+#define SL_FIND_EX_SEARCH_NAME_MATCH 0U
+#define SL_FIND_EX_SEARCH_LIMIT_TO_DIRECTORIES 1U
+#define SL_FIND_EX_SEARCH_LIMIT_TO_DEVICES 2U
+#define SL_FIND_FIRST_EX_CASE_SENSITIVE 0x00000001U
+#define SL_FIND_FIRST_EX_LARGE_FETCH 0x00000002U
+#define SL_FIND_FIRST_EX_ON_DISK_ENTRIES_ONLY 0x00000004U
+#define SL_FIND_FIRST_EX_SUPPORTED_FLAGS                                      \
+    (SL_FIND_FIRST_EX_CASE_SENSITIVE | SL_FIND_FIRST_EX_LARGE_FETCH |         \
+     SL_FIND_FIRST_EX_ON_DISK_ENTRIES_ONLY)
 
 #define SL_STD_INPUT_ID UINT32_C(0xfffffff6)
 #define SL_STD_OUTPUT_ID UINT32_C(0xfffffff5)
@@ -2127,6 +2142,48 @@ static uint32_t win32_error_from_host(int host_error, uint32_t fallback) {
     }
 }
 
+static uint32_t win32_error_from_search(sl_search_result status,
+                                        int host_error,
+                                        uint32_t no_match_error) {
+    switch (status) {
+    case SL_SEARCH_INVALID_ARGUMENT:
+        return SL_ERROR_INVALID_PARAMETER;
+    case SL_SEARCH_INVALID_ENCODING:
+        return SL_ERROR_NO_UNICODE_TRANSLATION;
+    case SL_SEARCH_INVALID_PATH:
+        return SL_ERROR_INVALID_NAME;
+    case SL_SEARCH_NO_MATCH:
+        return no_match_error;
+    case SL_SEARCH_OUT_OF_MEMORY:
+        return SL_ERROR_NOT_ENOUGH_MEMORY;
+    case SL_SEARCH_IO:
+        switch (host_error) {
+        case ENOENT:
+        case ENOTDIR:
+            return SL_ERROR_PATH_NOT_FOUND;
+        case EACCES:
+        case EPERM:
+        case EROFS:
+        case ELOOP:
+            return SL_ERROR_ACCESS_DENIED;
+        case EBADF:
+            return SL_ERROR_INVALID_HANDLE;
+        case EMFILE:
+        case ENFILE:
+            return SL_ERROR_TOO_MANY_OPEN_FILES;
+        case ENAMETOOLONG:
+            return SL_ERROR_FILENAME_EXCED_RANGE;
+        case ENOMEM:
+            return SL_ERROR_NOT_ENOUGH_MEMORY;
+        default:
+            return SL_ERROR_GEN_FAILURE;
+        }
+    case SL_SEARCH_OK:
+        return SL_ERROR_SUCCESS;
+    }
+    return SL_ERROR_GEN_FAILURE;
+}
+
 static sl_status acquire_current_file(const void *handle,
                                       sl_handle_lease *lease,
                                       sl_win32_file **file) {
@@ -2141,6 +2198,24 @@ static sl_status acquire_current_file(const void *handle,
         (sl_handle)(uintptr_t)handle, SL_HANDLE_KIND_FILE, lease);
     if (status == SL_OK) {
         *file = lease->object;
+    }
+    return status;
+}
+
+static sl_status acquire_current_search(const void *handle,
+                                        sl_handle_lease *lease,
+                                        sl_win32_search **search) {
+    *lease = (sl_handle_lease){0};
+    *search = NULL;
+    sl_win32_process *process = current_process_if_installed();
+    if (process == NULL) {
+        return SL_ERROR_HANDLE_NOT_FOUND;
+    }
+    sl_status status = sl_handle_table_acquire(
+        sl_win32_process_handle_table(process),
+        (sl_handle)(uintptr_t)handle, SL_HANDLE_KIND_SEARCH, lease);
+    if (status == SL_OK) {
+        *search = lease->object;
     }
     return status;
 }
@@ -2486,6 +2561,131 @@ static sl_win32_bool SL_WINAPI sl_kernel32_set_file_pointer_ex(
     return SL_WIN32_TRUE;
 }
 
+static void *SL_WINAPI sl_kernel32_find_first_file_ex_w(
+    const uint16_t *filename, uint32_t information_level,
+    sl_win32_find_data_w *find_data, uint32_t search_operation,
+    void *search_filter, uint32_t additional_flags) {
+    void *const invalid_handle = (void *)UINTPTR_MAX;
+    if (filename == NULL || find_data == NULL) {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
+        return invalid_handle;
+    }
+    if (information_level != SL_FIND_EX_INFO_STANDARD &&
+        information_level != SL_FIND_EX_INFO_BASIC) {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
+        return invalid_handle;
+    }
+    if (search_operation == SL_FIND_EX_SEARCH_LIMIT_TO_DEVICES) {
+        sl_last_error = SL_ERROR_NOT_SUPPORTED;
+        return invalid_handle;
+    }
+    if ((search_operation != SL_FIND_EX_SEARCH_NAME_MATCH &&
+         search_operation != SL_FIND_EX_SEARCH_LIMIT_TO_DIRECTORIES) ||
+        search_filter != NULL) {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
+        return invalid_handle;
+    }
+    if ((additional_flags & ~SL_FIND_FIRST_EX_SUPPORTED_FLAGS) != 0U) {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
+        return invalid_handle;
+    }
+
+    size_t filename_length = 0U;
+    if (!utf16_terminated_length(filename, &filename_length)) {
+        sl_last_error = SL_ERROR_FILENAME_EXCED_RANGE;
+        return invalid_handle;
+    }
+
+    sl_win32_process *process = current_process_if_installed();
+    if (process == NULL) {
+        sl_last_error = SL_ERROR_INVALID_HANDLE;
+        return invalid_handle;
+    }
+    int root_fd = sl_win32_process_filesystem_directory(process);
+    if (root_fd < 0) {
+        sl_last_error = SL_ERROR_PATH_NOT_FOUND;
+        return invalid_handle;
+    }
+
+    sl_win32_search_options options = {
+        .case_sensitive =
+            (additional_flags & SL_FIND_FIRST_EX_CASE_SENSITIVE) != 0U,
+        .directories_only =
+            search_operation == SL_FIND_EX_SEARCH_LIMIT_TO_DIRECTORIES,
+    };
+    sl_win32_search *search = NULL;
+    sl_win32_find_data_w first_result;
+    int host_error = 0;
+    sl_search_result search_status = sl_win32_search_open(
+        root_fd, filename, filename_length, options, &search, &first_result,
+        &host_error);
+    if (search_status != SL_SEARCH_OK) {
+        sl_last_error = win32_error_from_search(
+            search_status, host_error, SL_ERROR_FILE_NOT_FOUND);
+        return invalid_handle;
+    }
+
+    sl_handle handle = 0U;
+    sl_status status = sl_handle_table_insert(
+        sl_win32_process_handle_table(process), SL_HANDLE_KIND_SEARCH,
+        search, sl_win32_search_destroy, &handle);
+    if (status != SL_OK) {
+        sl_win32_search_destroy(search);
+        if (status == SL_ERROR_HANDLE_TABLE_FULL) {
+            sl_last_error = SL_ERROR_TOO_MANY_OPEN_FILES;
+        } else if (status == SL_ERROR_OUT_OF_MEMORY) {
+            sl_last_error = SL_ERROR_NOT_ENOUGH_MEMORY;
+        } else {
+            sl_last_error = SL_ERROR_GEN_FAILURE;
+        }
+        return invalid_handle;
+    }
+
+    *find_data = first_result;
+    return (void *)(uintptr_t)handle;
+}
+
+static sl_win32_bool SL_WINAPI sl_kernel32_find_next_file_w(
+    void *handle, sl_win32_find_data_w *find_data) {
+    if (find_data == NULL) {
+        sl_last_error = SL_ERROR_INVALID_PARAMETER;
+        return SL_WIN32_FALSE;
+    }
+
+    sl_handle_lease lease = {0};
+    sl_win32_search *search = NULL;
+    if (acquire_current_search(handle, &lease, &search) != SL_OK) {
+        sl_last_error = SL_ERROR_INVALID_HANDLE;
+        return SL_WIN32_FALSE;
+    }
+
+    sl_win32_find_data_w next_result;
+    int host_error = 0;
+    sl_search_result status =
+        sl_win32_search_next(search, &next_result, &host_error);
+    sl_handle_lease_release(&lease);
+    if (status != SL_SEARCH_OK) {
+        sl_last_error = win32_error_from_search(
+            status, host_error, SL_ERROR_NO_MORE_FILES);
+        return SL_WIN32_FALSE;
+    }
+
+    *find_data = next_result;
+    return SL_WIN32_TRUE;
+}
+
+static sl_win32_bool SL_WINAPI sl_kernel32_find_close(void *handle) {
+    sl_win32_process *process = current_process_if_installed();
+    if (process == NULL ||
+        sl_handle_table_close(sl_win32_process_handle_table(process),
+                              (sl_handle)(uintptr_t)handle,
+                              SL_HANDLE_KIND_SEARCH) != SL_OK) {
+        sl_last_error = SL_ERROR_INVALID_HANDLE;
+        return SL_WIN32_FALSE;
+    }
+    return SL_WIN32_TRUE;
+}
+
 static void SL_WINAPI sl_kernel32_get_startup_info_w(void *startup_info) {
     if (startup_info == NULL) {
         sl_last_error = SL_ERROR_INVALID_PARAMETER;
@@ -2689,6 +2889,12 @@ static void initialize_kernel32_exports(void) {
                   sl_kernel32_flush_file_buffers);
     SL_ADD_EXPORT(exports, export_count, "SetFilePointerEx",
                   sl_kernel32_set_file_pointer_ex);
+    SL_ADD_EXPORT(exports, export_count, "FindFirstFileExW",
+                  sl_kernel32_find_first_file_ex_w);
+    SL_ADD_EXPORT(exports, export_count, "FindNextFileW",
+                  sl_kernel32_find_next_file_w);
+    SL_ADD_EXPORT(exports, export_count, "FindClose",
+                  sl_kernel32_find_close);
     SL_ADD_EXPORT(exports, export_count, "GetStartupInfoW",
                   sl_kernel32_get_startup_info_w);
     SL_ADD_EXPORT(exports, export_count, "CloseHandle",

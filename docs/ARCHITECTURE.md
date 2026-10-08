@@ -72,13 +72,14 @@ guest x86-64 entry point            NT/process object model
   snapshot protocol keeps the table coherent across the isolated worker's
   `clone`, rejecting active leases or destructors, while process teardown
   drains still-open objects after guest operations are quiescent. `CloseHandle`
-  dispatches only `FILE` tokens into this core; `SEARCH` remains reserved for
-  `FindClose`, and general disk paths are not connected yet.
+  dispatches only `FILE` tokens into this core. `FindFirstFileExW` publishes a
+  `SEARCH`, `FindNextFileW` holds a lease while advancing it, and `FindClose`
+  alone invalidates that token; general disk paths are not connected yet.
 - `process`: owns stable per-guest process state: an OS-random pointer cookie,
   typed handle table, three atomic standard-handle slots, minimal PEB, and
   normalized process-parameters storage. Before publication it can also pin
-  one host directory through a private close-on-exec descriptor for future
-  relative filesystem lookups, without changing the host's global working
+  one host directory through a private close-on-exec descriptor used by
+  relative directory searches, without changing the host's global working
   directory. Standard-handle values are isolated between processes but remain
   raw, non-owning values until file objects are connected. Before any thread or
   worker retains it, a one-shot operation can
@@ -90,8 +91,8 @@ guest x86-64 entry point            NT/process object model
   It also owns the atomically replaceable top-level exception filter used by
   explicit guest exception dispatch.
   Module-space, main-module, and path getters are borrowed read-only views valid
-  for the retained process lifetime. Guest-facing handle APIs and recursive
-  loader state remain future work.
+  for the retained process lifetime. Additional object APIs and recursive loader
+  state remain future work.
 - `context`: installs a nestable thread-local view of the active Windows thread
   and process object; last-error, thread identity, TLS/FLS values, and pointer
   encoding already use it. An atomic ownership token prevents one guest context
@@ -106,7 +107,7 @@ guest x86-64 entry point            NT/process object model
   worker installs the TEB base in GS only around guest execution and verifies
   restoration before releasing it.
 - `kernel32`: provides the first host-backed x86-64 `ms_abi` thunks. Current
-  coverage is a 70-export bootstrap subset backed by the minimal PEB/TEB
+  coverage is a 73-export bootstrap subset backed by the minimal PEB/TEB
   layouts. Module queries resolve only inside the installed process context.
   `GetModuleHandleW` and `GetModuleHandleExW` expose the main image or
   registered PE basenames; the latter can also identify a module by an address
@@ -132,7 +133,12 @@ guest x86-64 entry point            NT/process object model
   `SetFilePointerEx` reports that console object as non-seekable. `CloseHandle`
   invalidates process-local `FILE` tokens, rejects stale or wrong-kind values,
   and intentionally does not clear standard-handle slots that reference a
-  closed token. Seven exception exports connect explicit raises,
+  closed token. `FindFirstFileExW` accepts the measured standard search plus
+  basic/case-sensitive/directory-only variants, confines relative patterns to
+  the process filesystem root, and publishes the first result only after its
+  `SEARCH` handle exists. `FindNextFileW` preserves output on exhaustion and
+  reports `ERROR_NO_MORE_FILES`; `FindClose` rejects `FILE` and stale tokens.
+  Seven exception exports connect explicit raises,
   process-local unhandled filtering, function lookup, virtual unwind, and
   second-pass unwind/context restoration to the static PE unwind engine. The
   subset does not yet constitute a complete loader, object, filesystem, or

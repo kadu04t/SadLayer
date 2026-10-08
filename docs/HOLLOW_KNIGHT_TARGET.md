@@ -22,16 +22,17 @@ The launcher imports `UnityMain2`; SadLayer resolves it to export ordinal 2 at
 RVA `0x7da7a0` in this `UnityPlayer.dll`.
 
 With the built-in KERNEL32 bootstrap subset enabled, the current launcher-only
-link check against the profiled files resolves 69 symbols and leaves three
-unresolved: `FindClose`, `FindFirstFileExW`, and `FindNextFileW`. The check was
-rerun against the hashes recorded above after adding `CreateFileW` and
-`SetFilePointerEx`; IAT binding remains intentionally skipped until the entire
-launcher import set resolves atomically. Disassembly of the two launcher calls
-to `CreateFileW` shows the same measured request: `CONOUT$`, generic write
-access, read/write sharing, `OPEN_EXISTING`, and zero optional flags. SadLayer
-now represents that device with a process-local typed `FILE` token and accepts
-it in the console/write/type APIs. General disk paths are deliberately not
-claimed by this checkpoint.
+link check against the profiled files resolves all 72 symbols with zero
+unresolved and reports `IAT binding complete: 72 symbols written`. The three
+final imports—`FindClose`, `FindFirstFileExW`, and `FindNextFileW`—now use the
+process's root-confined relative search backend and typed `SEARCH` handles.
+This is an atomic address-resolution result for the launcher, not a claim that
+UnityPlayer's own 522 imports are bound or behaviorally complete. Disassembly
+of the two launcher calls to `CreateFileW` shows the same measured request:
+`CONOUT$`, generic write access, read/write sharing, `OPEN_EXISTING`, and zero
+optional flags. SadLayer represents that device with a process-local typed
+`FILE` token and accepts it in the console/write/type APIs. General disk paths
+are deliberately not claimed by this checkpoint.
 
 The profiled exception directories contain 323 runtime-function entries with
 137 distinct unwind records in the launcher and 103,587 entries with 67,501
@@ -75,11 +76,10 @@ image-substitution gap, but it does not make the profiled game graph runnable.
 
 The execution mapper now reserves this launcher at `0x140000000` on the profiled
 host, applies its final page protections, and identifies the entry address as
-`0x140001264`. SadLayer still does not transfer control to it: the remaining
-launcher imports, recursive UnityPlayer dependency binding, initialization
-order, API Set routing, and PE TLS are explicit gates. The next
-launcher-specific work is the three directory-search imports followed by
-recursive module discovery/loading.
+`0x140001264`. The launcher's static IAT is now fully bindable, but SadLayer
+still does not transfer control to it: recursive UnityPlayer dependency
+loading/binding, initialization order, API Set routing, and PE TLS are explicit
+gates. The next launcher-specific work is recursive module discovery/loading.
 
 ## Direct UnityPlayer modules
 

@@ -36,7 +36,7 @@ The bootstrap can already:
   UTF-16 copy of its guest-visible path while keeping `PEB.ImageBaseAddress`
   equal to the main mapping;
 - bind PE32/PE32+ import address tables without partial writes;
-- expose an initial 70-export `KERNEL32.dll` subset through x86-64 `ms_abi`
+- expose an initial 73-export `KERNEL32.dll` subset through x86-64 `ms_abi`
   thunks for last-error state, time/identity, heap, TLS, no-fiber FLS, critical
   sections, text conversion, process strings, locale basics, standard streams,
   pointer encoding, process-scoped PE module queries, static x64
@@ -48,7 +48,12 @@ The bootstrap can already:
   tokens reject stale and wrong-kind access, while reference-counted leases keep
   an object alive when close races an operation; `CreateFileW` publishes the
   launcher's measured `CONOUT$` device as a `FILE/CHAR` token and `CloseHandle`
-  consumes it, while general disk paths and search objects remain future work;
+  consumes it; `FindFirstFileExW` publishes root-confined relative searches as
+  `SEARCH` tokens, `FindNextFileW` iterates them under a lease, and `FindClose`
+  consumes them exclusively, while general disk paths remain future work;
+- resolve all 72 imports of the profiled launcher when its matching
+  `UnityPlayer.dll` is supplied explicitly and bind its IAT atomically; this
+  does not yet load or bind UnityPlayer's own dependency graph;
 - convert explicit-length UTF-8/UTF-16 strictly or with replacement, without
   exposing Linux `wchar_t` at the Windows boundary;
 - install nestable per-thread runtime contexts and route last-error, thread
@@ -147,9 +152,9 @@ In a container or debugger where LeakSanitizer cannot attach, use
 `map` now reserves the image at its real execution address and applies final PE
 page protections. The isolated GS/TEB worker is intentionally restricted to
 repository fixtures; `run` still stops before calling arbitrary guest code
-until the remaining launcher imports and recursive dependency binding exist.
-Its exit code is `3`, which makes automation distinguish “valid but not
-runnable yet” from malformed input.
+until recursive dependency binding, DLL initialization, and PE TLS exist. Its
+exit code is `3`, which makes automation distinguish “valid but not runnable
+yet” from malformed input.
 
 `link-check` registers the supplied PE DLL and SadLayer's built-in KERNEL32,
 reports which executable imports it can resolve, and binds the IAT only when
